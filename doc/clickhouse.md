@@ -1,0 +1,276 @@
+# clickhouse.h
+
+Core header. Types, errors, allocator, I/O vtable, type-name parser & AST,
+varint codec, block reader/writer, column accessors. No I/O backend, no TCP
+loop, no compression — sibling headers cover those.
+
+stb-style single-header. Exactly one TU defines `CHC_IMPLEMENTATION`; others
+include for declarations only.
+
+## Errors
+
+```c
+enum {
+    CHC_OK            =  0,
+    CHC_ERR_IO        = -1,
+    CHC_ERR_EOF       = -2,
+    CHC_ERR_PROTOCOL  = -3,
+    CHC_ERR_TYPE      = -4,
+    CHC_ERR_OOM       = -5,
+    CHC_ERR_CANCELLED = -6,
+    CHC_ERR_SERVER    = -7,
+    CHC_ERR_USAGE     = -8,
+};
+
+typedef struct chc_err {
+    int  code;                       /* 0 on success, CHC_ERR_* otherwise */
+    int  server_code;                /* set when code == CHC_ERR_SERVER */
+    char msg[CHC_ERR_MSG_LEN];       /* default 256, NUL-terminated, snprintf-truncated */
+    char server_name[64];            /* CH exception class, if SERVER */
+} chc_err;
+
+static inline void chc_err_reset(chc_err *e);
+```
+
+Caller-stack-allocated; library never heap-allocates an error. Override
+`CHC_ERR_MSG_LEN` before including to resize `msg`.
+
+## Allocator
+
+```c
+typedef struct chc_alloc {
+    void *ud;
+    void *(*alloc)  (void *ud, size_t bytes);
+    void *(*realloc)(void *ud, void *p, size_t old_bytes, size_t new_bytes);
+    void  (*free)   (void *ud, void *p, size_t bytes);
+} chc_alloc;
+```
+
+`alloc` may return NULL or `longjmp`; library treats both as OOM.
+`old_bytes` lets a `new`/`delete`-backed allocator emulate `realloc` via
+copy-then-free. `free` may be a no-op for arena allocators (PG `palloc`).
+
+Stdlib backend, gated on a define so it doesn't drag in `<stdlib.h>` for
+freestanding builds:
+
+```c
+#define CHC_PROVIDE_STDLIB_ALLOC
+#include "clickhouse.h"
+chc_alloc al = chc_alloc_stdlib();
+```
+
+PostgreSQL `palloc`/`repalloc`/`pfree` wiring: see
+[examples/pg_alloc_thunks.c](../examples/pg_alloc_thunks.c).
+
+## I/O
+
+```c
+typedef struct chc_io {
+    void *ud;
+    int (*read)        (void *ud, void *buf, size_t len, size_t *out_n, chc_err *err);
+    int (*write)       (void *ud, const void *buf, size_t len, chc_err *err);
+    int (*check_cancel)(void *ud);   /* optional, NULL = never */
+} chc_io;
+```
+
+`read` may short-read; library loops. `EAGAIN`/`EINTR` are the callback's
+problem. `check_cancel` is polled between reads; non-zero aborts with
+`CHC_ERR_CANCELLED`. Ready-made backends: [clickhouse-posix-io.md](clickhouse-posix-io.md),
+[clickhouse-openssl.md](clickhouse-openssl.md).
+
+## Type AST
+
+```c
+typedef enum chc_kind {
+    CHC_VOID = 0,
+    CHC_INT8, CHC_INT16, CHC_INT32, CHC_INT64, CHC_INT128, CHC_INT256,
+    CHC_UINT8, CHC_UINT16, CHC_UINT32, CHC_UINT64, CHC_UINT128, CHC_UINT256,
+    CHC_FLOAT32, CHC_FLOAT64, CHC_BFLOAT16,
+    CHC_BOOL,
+    CHC_DATE, CHC_DATE32,
+    CHC_DATETIME, CHC_DATETIME64,
+    CHC_TIME, CHC_TIME64,
+    CHC_STRING, CHC_FIXED_STRING,
+    CHC_DECIMAL32, CHC_DECIMAL64, CHC_DECIMAL128, CHC_DECIMAL256,
+    CHC_UUID, CHC_IPV4, CHC_IPV6,
+    CHC_ENUM8, CHC_ENUM16,
+    CHC_NULLABLE, CHC_ARRAY, CHC_TUPLE, CHC_MAP, CHC_NESTED,
+    CHC_LOW_CARDINALITY,
+    CHC_INTERVAL,
+    CHC_POINT, CHC_RING, CHC_POLYGON, CHC_MULTI_POLYGON,
+    CHC_VARIANT, CHC_DYNAMIC, CHC_JSON, CHC_OBJECT,
+    CHC_AGGREGATE_FUNCTION, CHC_SIMPLE_AGGREGATE_FUNCTION,
+    CHC_NOTHING,
+    CHC_KIND_COUNT
+} chc_kind;
+
+typedef struct chc_type chc_type;
+
+int  chc_type_parse  (const char *name, size_t name_len,
+                      const chc_alloc *al, chc_type **out, chc_err *err);
+void chc_type_destroy(chc_type *t, const chc_alloc *al);
+```
+
+Parses printable type names like `Array(Nullable(DateTime64(3, 'UTC')))`
+into an AST. Block reader uses this internally; the AST also reaches the
+caller via `chc_block_column_type`.
+
+Accessors:
+
+```c
+chc_kind         chc_type_kind        (const chc_type *t);
+size_t           chc_type_n_children  (const chc_type *t);
+const chc_type  *chc_type_child       (const chc_type *t, size_t i);
+
+int              chc_type_fixed_size        (const chc_type *t);
+int              chc_type_decimal_precision (const chc_type *t);
+int              chc_type_decimal_scale     (const chc_type *t);
+int              chc_type_datetime64_scale  (const chc_type *t);
+const char      *chc_type_timezone          (const chc_type *t, size_t *out_len);
+const char      *chc_type_name              (const chc_type *t, size_t *out_len);
+
+size_t           chc_type_enum_count        (const chc_type *t);
+void             chc_type_enum_at           (const chc_type *t, size_t i,
+                                             const char **name, size_t *name_len,
+                                             int64_t *value);
+
+const char      *chc_type_tuple_field_name  (const chc_type *t, size_t i,
+                                             size_t *out_len);
+
+size_t           chc_type_format            (const chc_type *t,
+                                             char *buf, size_t buf_len);
+```
+
+`chc_type_format` is snprintf-style: pass `NULL`/0 to query length, then
+allocate & call again.
+
+`Decimal*` precision is implicit in the kind: 9 / 18 / 38 / 76 digits for
+32/64/128/256-bit. `chc_type_decimal_scale` returns the explicit `S`.
+
+`DateTime64` timezone is metadata only; ticks on the wire are UTC.
+
+## Columns
+
+```c
+typedef enum chc_col_kind {
+    CHC_COL_FIXED = 1,
+    CHC_COL_STRING,
+    CHC_COL_NULLABLE,
+    CHC_COL_ARRAY,
+    CHC_COL_TUPLE,
+    CHC_COL_LOW_CARDINALITY,
+    CHC_COL_NOTHING,
+} chc_col_kind;
+
+typedef struct chc_column chc_column;
+
+chc_col_kind chc_column_layout (const chc_column *c);
+size_t       chc_column_n_rows (const chc_column *c);
+```
+
+Caller dispatches on `chc_column_layout`:
+
+| Layout | Accessors |
+|---|---|
+| `CHC_COL_FIXED` | `chc_column_fixed_data(c, &elem_size)` — `n_rows * elem_size` LE bytes |
+| `CHC_COL_STRING` | `chc_column_string_data(c)`, `chc_column_string_offsets(c)` — `offsets[i]` is row i's exclusive end, host byte order; row 0 starts at 0 |
+| `CHC_COL_NULLABLE` | `chc_column_null_map(c)` (1 byte per row, 1 = NULL), `chc_column_nullable_inner(c)` |
+| `CHC_COL_ARRAY` | `chc_column_array_offsets(c)` (cumulative ends, host byte order), `chc_column_array_values(c)`; Map decodes as Array(Tuple(K,V)) |
+| `CHC_COL_TUPLE` | `chc_column_tuple_arity(c)`, `chc_column_tuple_child(c, i)` — each child has the same row count |
+| `CHC_COL_LOW_CARDINALITY` | `chc_column_lc_key_size(c)` (1/2/4/8), `chc_column_lc_keys(c)` (host byte order), `chc_column_lc_dict(c)`; dict slot 0 is the default value; NULLs ride at slot 0 of inner Nullable |
+
+## Block reader
+
+```c
+typedef struct chc_block chc_block;
+
+typedef struct chc_block_opts {
+    bool   has_block_info;            /* TCP server_revision >= 51903 */
+    bool   has_custom_serialization;  /* TCP server_revision >= 54454 */
+    size_t read_buffer_bytes;         /* 0 = default 8 KiB */
+} chc_block_opts;
+
+int  chc_block_read   (chc_io *io, const chc_alloc *al,
+                       const chc_block_opts *opts,
+                       chc_block **out, chc_err *err);
+void chc_block_destroy(chc_block *b, const chc_alloc *al);
+
+size_t            chc_block_n_rows       (const chc_block *b);
+size_t            chc_block_n_columns    (const chc_block *b);
+const char       *chc_block_column_name  (const chc_block *b, size_t i, size_t *out_len);
+const chc_type   *chc_block_column_type  (const chc_block *b, size_t i);
+const chc_column *chc_block_column       (const chc_block *b, size_t i);
+
+bool    chc_block_is_overflows (const chc_block *b);
+int32_t chc_block_bucket_num   (const chc_block *b);
+```
+
+Clean EOF at a block boundary returns `CHC_OK` with `*out == NULL`. Any
+short read mid-block is `CHC_ERR_EOF`. The TCP packet loop in
+[clickhouse-client.md](clickhouse-client.md) drives this with the right
+`opts` flags; for `clickhouse local` over a pipe both flags are false.
+
+BlockInfo accessors return zero when `has_block_info == false`.
+
+Tier 4 types (`Variant`, `Dynamic`, `JSON`, `Object('json')`,
+`AggregateFunction`, `QBit`) return `CHC_ERR_TYPE`. Wire format still
+shifting in 25.x / 26.x. Consumer falls back to `CAST(... AS String)`.
+
+`SimpleAggregateFunction(f, T)` decodes as `T` — wire is just T's stream.
+
+## Block writer
+
+```c
+typedef struct chc_block_builder chc_block_builder;
+
+int  chc_block_builder_init   (chc_block_builder **out, const chc_alloc *al,
+                               chc_err *err);
+void chc_block_builder_destroy(chc_block_builder *bb);
+
+int  chc_block_builder_append_fixed (chc_block_builder *bb,
+                                     const char *name, size_t name_len,
+                                     const chc_type *t,
+                                     const void *data, size_t n_rows,
+                                     chc_err *err);
+
+int  chc_block_builder_append_string(chc_block_builder *bb,
+                                     const char *name, size_t name_len,
+                                     const uint64_t *offsets,
+                                     const uint8_t *data, size_t n_rows,
+                                     chc_err *err);
+
+int  chc_block_write(chc_io *io, const chc_block_builder *bb,
+                     const chc_block_opts *opts, chc_err *err);
+```
+
+Append calls record slab pointers; nothing is copied. Slabs must outlive
+`chc_block_write`. Offsets are cumulative exclusive ends in host byte
+order; fixed data is `n_rows * elem_size` little-endian bytes.
+
+For INSERT over TCP, hand the builder to `chc_client_send_data` rather
+than calling `chc_block_write` directly — the client sets the right
+`opts` from the negotiated revision and handles compression.
+
+## Pitfalls
+
+* **FIXED slabs are LE on the wire.** `chc_column_fixed_data` returns
+  raw bytes; on BE hosts the caller swaps when reading multi-byte ints.
+  Offsets & LowCardinality keys are byte-swapped at decode, safe to
+  dereference as host ints on either endianness.
+* **UUID byte order.** CH stores UUID as two LE `UInt64` halves.
+* **IPv4 byte order.** 4-byte LE int. IPv6 is NBO — no swap.
+* **DateTime64 timezone is metadata only.** Ticks are UTC.
+* **Decimal precision is implicit.** `Decimal32` = 9 digits, `Decimal64`
+  = 18, `Decimal128` = 38, `Decimal256` = 76.
+
+## Required server settings
+
+```
+output_format_native_encode_types_in_binary_format = 0
+```
+
+Set this in the Query packet's settings list (TCP) or on the
+`clickhouse local` command line. If the server emits binary type tags
+anyway, `chc_block_read` returns `CHC_ERR_TYPE` with a message naming
+the column. Sparse columns are stripped by `NativeWriter` in CH 25.x;
+no caller setting required.

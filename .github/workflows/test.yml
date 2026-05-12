@@ -1,0 +1,47 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liblz4-dev libzstd-dev libssl-dev
+
+      - name: Install ClickHouse
+        run: |
+          curl -fsSL 'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' \
+            | sudo gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg
+          ARCH=$(dpkg --print-architecture)
+          echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg arch=${ARCH}] https://packages.clickhouse.com/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/clickhouse.list
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y clickhouse-common-static clickhouse-client
+
+      - name: Checkout ClickHouse server configs
+        uses: actions/checkout@v6
+        with:
+          repository: ClickHouse/ClickHouse
+          sparse-checkout: programs/server
+          sparse-checkout-cone-mode: false
+          path: clickhouse-src
+
+      - name: Run tests
+        env:
+          CLICKHOUSE_SRC: ${{ github.workspace }}/clickhouse-src
+        run: ./test.sh
+
+      - name: Upload server logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: clickhouse-server-logs
+          path: /tmp/ch-test-srv/server.*
+          if-no-files-found: ignore
