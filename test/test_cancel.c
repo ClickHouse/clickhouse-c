@@ -226,7 +226,7 @@ test_blocked_read_eintr(void) {
      * then the *next* refill sees cancel & returns CANCELLED. Pin both
      * facts so a future fix surfaces clearly:
      *   - elapsed >= 150ms (proves we waited for the child write)
-     *   - final rc is CANCELLED (cancel was honoured on the eventual
+     *   - final rc is CANCELLED (cancel was honored on the eventual
      *     refill after the byte arrived)
      */
     CHECK(elapsed_ms >= 150);

@@ -126,9 +126,8 @@ typedef enum chc_packet_kind {
     CHC_PKT_PROFILE_EVENTS  = 14,
 } chc_packet_kind;
 
-/* CHC_PKT_EXCEPTION payload. `nested` is the head of a singly-linked
- * chain if the server sent has_nested = 1. Caller frees with
- * chc_exception_free if produced. */
+/* CHC_PKT_EXCEPTION payload. Caller frees with chc_exception_free
+ * if produced. */
 typedef struct chc_exception chc_exception;
 struct chc_exception {
     int32_t        code;
@@ -138,7 +137,6 @@ struct chc_exception {
     size_t         display_text_len;
     char          *stack_trace;
     size_t         stack_trace_len;
-    chc_exception *nested;
 };
 
 void chc_exception_free(chc_exception *e, const chc_alloc *al);
@@ -248,14 +246,11 @@ struct chc_client {
 void
 chc_exception_free(chc_exception *e, const chc_alloc *al)
 {
-    while (e) {
-        chc_exception *next = e->nested;
-        if (e->name)         al->free(al->ud, e->name,         e->name_len         + 1);
-        if (e->display_text) al->free(al->ud, e->display_text, e->display_text_len + 1);
-        if (e->stack_trace)  al->free(al->ud, e->stack_trace,  e->stack_trace_len  + 1);
-        al->free(al->ud, e, sizeof *e);
-        e = next;
-    }
+    if (!e) return;
+    if (e->name)         al->free(al->ud, e->name,         e->name_len         + 1);
+    if (e->display_text) al->free(al->ud, e->display_text, e->display_text_len + 1);
+    if (e->stack_trace)  al->free(al->ud, e->stack_trace,  e->stack_trace_len  + 1);
+    al->free(al->ud, e, sizeof *e);
 }
 
 static int
@@ -302,30 +297,19 @@ chc__copy_short(char *dst, size_t cap, const char *src, size_t len)
 static int
 chc__read_exception(chc_client *c, chc_exception **out, chc_err *err)
 {
-    chc_exception *head = NULL, *tail = NULL;
-    for (;;) {
-        chc_exception *e = chc__calloc(c->al, sizeof *e, err);
-        if (!e) { chc_exception_free(head, c->al); return CHC_ERR_OOM; }
-        int rc;
-        if ((rc = chc__read_i32_le (&c->in, &e->code, err)) ||
-            (rc = chc__read_string (&c->in, &e->name,         &e->name_len,         err)) ||
-            (rc = chc__read_string (&c->in, &e->display_text, &e->display_text_len, err)) ||
-            (rc = chc__read_string (&c->in, &e->stack_trace,  &e->stack_trace_len,  err))) {
-            chc_exception_free(e, c->al);
-            chc_exception_free(head, c->al);
-            return rc;
-        }
-        uint8_t has_nested;
-        if ((rc = chc__read_byte(&c->in, &has_nested, err))) {
-            chc_exception_free(e, c->al);
-            chc_exception_free(head, c->al);
-            return rc;
-        }
-        if (tail) tail->nested = e; else head = e;
-        tail = e;
-        if (!has_nested) break;
+    chc_exception *e = chc__calloc(c->al, sizeof *e, err);
+    if (!e) return CHC_ERR_OOM;
+    uint8_t has_nested;
+    int rc;
+    if ((rc = chc__read_i32_le (&c->in, &e->code, err)) ||
+        (rc = chc__read_string (&c->in, &e->name,         &e->name_len,         err)) ||
+        (rc = chc__read_string (&c->in, &e->display_text, &e->display_text_len, err)) ||
+        (rc = chc__read_string (&c->in, &e->stack_trace,  &e->stack_trace_len,  err)) ||
+        (rc = chc__read_byte   (&c->in, &has_nested, err))) {
+        chc_exception_free(e, c->al);
+        return rc;
     }
-    *out = head;
+    *out = e;
     return CHC_OK;
 }
 

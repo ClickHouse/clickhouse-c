@@ -118,7 +118,7 @@ Exceptions arrive as `CHC_PKT_EXCEPTION` packets — `recv_packet` returns
 non-OK. `TABLE_COLUMNS` body is consumed & discarded (no caller-visible
 fields).
 
-`chc_packet_clear` frees the `block` & `exception` chain. NULLing them on
+`chc_packet_clear` frees the `block` & `exception`. NULLing them on
 the packet before calling transfers ownership to the caller.
 
 ```c
@@ -128,7 +128,6 @@ struct chc_exception {
     char    *name;          size_t name_len;
     char    *display_text;  size_t display_text_len;
     char    *stack_trace;   size_t stack_trace_len;
-    chc_exception *nested;  /* singly-linked chain */
 };
 
 void chc_exception_free(chc_exception *e, const chc_alloc *al);
