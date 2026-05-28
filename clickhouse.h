@@ -604,6 +604,27 @@ chc_alloc chc_alloc_stdlib(void) {
 #define CHC_READ_BUFFER 8192
 #endif
 
+/* Mirror ClickHouse's limits:
+ * https://github.com/ClickHouse/ClickHouse/blob/ef11941cf5a/src/IO/ReadHelpers.h#L38
+ * https://github.com/ClickHouse/ClickHouse/blob/ef11941cf5a/src/Core/Defines.h#L156-L158
+ * https://github.com/ClickHouse/ClickHouse/blob/ef11941cf5a/src/DataTypes/DataTypeFixedString.h#L5
+ * https://github.com/ClickHouse/ClickHouse/blob/ef11941cf5a/src/DataTypes/DataTypeFactory.cpp#L122-L127 */
+#ifndef CHC_MAX_STRING_SIZE
+#define CHC_MAX_STRING_SIZE       (1ULL << 30)
+#endif
+#ifndef CHC_MAX_NUM_COLUMNS
+#define CHC_MAX_NUM_COLUMNS       1000000ULL
+#endif
+#ifndef CHC_MAX_NUM_ROWS
+#define CHC_MAX_NUM_ROWS          1000000000000ULL
+#endif
+#ifndef CHC_MAX_FIXEDSTRING_SIZE
+#define CHC_MAX_FIXEDSTRING_SIZE  0xFFFFFFULL
+#endif
+#ifndef CHC_MAX_TYPE_DEPTH
+#define CHC_MAX_TYPE_DEPTH        300
+#endif
+
 typedef struct chc__in {
     chc_io          *io;
     const chc_alloc *al;
@@ -777,7 +798,7 @@ chc__read_string(chc__in *in, char **out, size_t *out_len, chc_err *err)
     uint64_t len;
     int rc = chc__read_varuint(in, &len, err);
     if (rc != CHC_OK) return rc;
-    if (len > 0x00FFFFFFULL)
+    if (len > CHC_MAX_STRING_SIZE)
         return chc__err_set(err, CHC_ERR_PROTOCOL, "string too long: %llu",
                             (unsigned long long) len);
     char *buf = chc__alloc(al, len + 1, err);
@@ -1302,7 +1323,7 @@ chc__name_to_kind(const char *s, size_t n)
 
 static int chc__parse_type(chc__lex *lx, const chc_alloc *al,
                            const char *whole_start, const char *whole_end,
-                           chc_type **out, chc_err *err);
+                           size_t depth, chc_type **out, chc_err *err);
 
 /* Append a child pointer to parent's children array. */
 static int
@@ -1341,8 +1362,13 @@ chc__type_push_enum(const chc_alloc *al, chc_type *parent,
 static int
 chc__parse_type(chc__lex *lx, const chc_alloc *al,
                 const char *whole_start, const char *whole_end,
-                chc_type **out, chc_err *err)
+                size_t depth, chc_type **out, chc_err *err)
 {
+    if (depth > CHC_MAX_TYPE_DEPTH)
+        return chc__err_set(err, CHC_ERR_TYPE,
+            "type nested too deeply (max %llu)",
+            (unsigned long long) CHC_MAX_TYPE_DEPTH);
+
     chc__tok head = chc__eat_tok(lx);
     if (head.kind != CHC__TOK_NAME || head.quote)
         return chc__err_set(err, CHC_ERR_TYPE, "expected type name");
@@ -1398,7 +1424,13 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE, "FixedString: expected N");
             }
-            t->param_a = (int) chc__atoi64(num.start, num.len);
+            int64_t n = chc__atoi64(num.start, num.len);
+            if (n <= 0 || (uint64_t) n > CHC_MAX_FIXEDSTRING_SIZE) {
+                chc_type_destroy(t, al);
+                return chc__err_set(err, CHC_ERR_TYPE,
+                    "FixedString: N out of range: %lld", (long long) n);
+            }
+            t->param_a = (int) n;
         } else if (decimal_alias) {
             chc__tok np = chc__eat_tok(lx);
             if (np.kind != CHC__TOK_NUMBER) {
@@ -1510,7 +1542,7 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                 }
 
                 chc_type *child = NULL;
-                int rc = chc__parse_type(lx, al, whole_start, whole_end, &child, err);
+                int rc = chc__parse_type(lx, al, whole_start, whole_end, depth + 1, &child, err);
                 if (rc == CHC_OK)
                     rc = chc__type_push_child(al, t, child, err);
                 else
@@ -1615,7 +1647,7 @@ chc_type_parse(const char *name, size_t name_len,
                const chc_alloc *al, chc_type **out, chc_err *err)
 {
     chc__lex lx = { name, name + name_len, {0}, false };
-    int rc = chc__parse_type(&lx, al, name, name + name_len, out, err);
+    int rc = chc__parse_type(&lx, al, name, name + name_len, 0, out, err);
     if (rc != CHC_OK) return rc;
     chc__tok tail = chc__eat_tok(&lx);
     if (tail.kind != CHC__TOK_EOS) {
@@ -1801,7 +1833,7 @@ chc__col_read_string(chc__in *in, size_t n_rows,
         uint64_t len;
         int rc = chc__read_varuint(in, &len, err);
         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
-        if (len > 0x00FFFFFFULL) { chc__column_destroy(c, al);
+        if (len > CHC_MAX_STRING_SIZE) { chc__column_destroy(c, al);
             return chc__err_set(err, CHC_ERR_PROTOCOL, "string row too long"); }
         if (total + len > cap) {
             size_t new_cap = cap;
@@ -2281,6 +2313,17 @@ chc__block_read_in(chc__in *in, const chc_alloc *al,
     if (rc != CHC_OK) goto fail;
     rc = chc__read_varuint(in, &nrows, err);
     if (rc != CHC_OK) goto fail;
+
+    if (ncols > CHC_MAX_NUM_COLUMNS) {
+        rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+            "suspiciously many columns: %llu", (unsigned long long) ncols);
+        goto fail;
+    }
+    if (nrows > CHC_MAX_NUM_ROWS) {
+        rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+            "suspiciously many rows: %llu", (unsigned long long) nrows);
+        goto fail;
+    }
 
     b->n_columns = (size_t) ncols;
     b->n_rows    = (size_t) nrows;
