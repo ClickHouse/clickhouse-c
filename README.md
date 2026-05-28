@@ -40,7 +40,7 @@ int main(void) {
     for (;;) {
         chc_block *block = NULL;
         chc_err err = {0};
-        if (chc_block_read(&io, &al, &opts, &block, &err) < 0) {
+        if (chc_block_read(&io, &al, &opts, &block, &err) != CHC_OK) {
             fprintf(stderr, "decode: %s\n", err.msg);
             return 1;
         }

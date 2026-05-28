@@ -11,15 +11,15 @@ include for declarations only.
 
 ```c
 enum {
-    CHC_OK            =  0,
-    CHC_ERR_IO        = -1,
-    CHC_ERR_EOF       = -2,
-    CHC_ERR_PROTOCOL  = -3,
-    CHC_ERR_TYPE      = -4,
-    CHC_ERR_OOM       = -5,
-    CHC_ERR_CANCELLED = -6,
-    CHC_ERR_SERVER    = -7,
-    CHC_ERR_USAGE     = -8,
+    CHC_OK            = 0,
+    CHC_ERR_IO        = 1,
+    CHC_ERR_EOF       = 2,
+    CHC_ERR_PROTOCOL  = 3,
+    CHC_ERR_TYPE      = 4,
+    CHC_ERR_OOM       = 5,
+    CHC_ERR_CANCELLED = 6,
+    CHC_ERR_SERVER    = 7,
+    CHC_ERR_USAGE     = 8,
 };
 
 typedef struct chc_err {
@@ -73,9 +73,12 @@ typedef struct chc_io {
 } chc_io;
 ```
 
-`read` may short-read; library loops. `EAGAIN`/`EINTR` are the callback's
-problem. `check_cancel` is polled between reads; non-zero aborts with
-`CHC_ERR_CANCELLED`. Ready-made backends: [clickhouse-posix-io.md](clickhouse-posix-io.md),
+`read` & `write` return `CHC_OK` (0) on success or a nonzero `CHC_ERR_*` on
+hard error (also recorded in `err`); a `read` returning `CHC_OK` with
+`*out_n == 0` signals clean EOF. `read` may short-read; library loops.
+`EAGAIN`/`EINTR` are the callback's problem. `check_cancel` is polled between
+reads; non-zero aborts with `CHC_ERR_CANCELLED`. Ready-made backends:
+[clickhouse-posix-io.md](clickhouse-posix-io.md),
 [clickhouse-openssl.md](clickhouse-openssl.md).
 
 ## Type AST
@@ -166,6 +169,8 @@ typedef struct chc_column chc_column;
 
 chc_col_kind chc_column_layout (const chc_column *c);
 size_t       chc_column_n_rows (const chc_column *c);
+
+int          chc_column_validate(const chc_column *c, chc_err *err);
 ```
 
 Caller dispatches on `chc_column_layout`:
@@ -178,6 +183,15 @@ Caller dispatches on `chc_column_layout`:
 | `CHC_COL_ARRAY` | `chc_column_array_offsets(c)` (cumulative ends, host byte order), `chc_column_array_values(c)`; Map decodes as Array(Tuple(K,V)) |
 | `CHC_COL_TUPLE` | `chc_column_tuple_arity(c)`, `chc_column_tuple_child(c, i)` — each child has the same row count |
 | `CHC_COL_LOW_CARDINALITY` | `chc_column_lc_key_size(c)` (1/2/4/8), `chc_column_lc_keys(c)` (host byte order), `chc_column_lc_dict(c)`; dict slot 0 is the default value; NULLs ride at slot 0 of inner Nullable |
+
+`chc_column_validate(c, &err)` walks a decoded column tree & enforces the
+cross-field invariants the server enforces on its own deserialization path —
+array offsets non-decreasing, LowCardinality keys within the dictionary.
+`chc_block_read` does **not** call it; a peer that forges offsets or keys can
+make these accessors read past inner-column bounds. Consumers ingesting from
+untrusted senders should call it on each column before traversing. Returns
+`CHC_OK`, or `CHC_ERR_PROTOCOL` with a reason on the first violation; `NULL`
+is treated as OK.
 
 ## Block reader
 
@@ -217,6 +231,24 @@ Tier 4 types (`Variant`, `Dynamic`, `JSON`, `Object('json')`,
 shifting in 25.x / 26.x. Consumer falls back to `CAST(... AS String)`.
 
 `SimpleAggregateFunction(f, T)` decodes as `T` — wire is just T's stream.
+
+## Decode limits
+
+`chc_block_read` rejects structurally implausible input up front. These
+sanity bounds mirror what ClickHouse enforces server-side; override any with
+`#define` before the implementation include.
+
+| Macro | Default | Bounds |
+|---|---|---|
+| `CHC_MAX_STRING_SIZE` | `1 << 30` | one String / FixedString / JSON value |
+| `CHC_MAX_NUM_COLUMNS` | `1000000` | columns per block |
+| `CHC_MAX_NUM_ROWS` | `1000000000000` | rows per block, & each per-column nested element count (Array / Map / Geo length, LowCardinality dictionary) |
+| `CHC_MAX_FIXEDSTRING_SIZE` | `0xFFFFFF` | `FixedString(N)` width |
+| `CHC_MAX_TYPE_DEPTH` | `300` | nested type-parser recursion, e.g. `Array(Array(…))` |
+
+Over-limit input returns `CHC_ERR_PROTOCOL`, or `CHC_ERR_TYPE` for the type
+bounds. Bounding the element counts & FixedString width also keeps
+`n_rows * elem_size` buffer sizing from overflowing `size_t`.
 
 ## Block writer
 

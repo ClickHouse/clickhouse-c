@@ -1,7 +1,7 @@
 /*
- * test_cancel.c -- coverage for the chc_io cancel hook.
+ * test_cancel.c -- coverage for the chc_io cancel hook & read deadline.
  *
- * Three behaviours pinned here:
+ * Four behaviours pinned here:
  *
  *  1. `check_cancel` set before a refill returns CHC_ERR_CANCELLED on
  *     the next read, no syscall observed.
@@ -17,6 +17,10 @@
  *     need wall-clock-bounded cancellation must run on a transport
  *     that delivers periodic bytes (CH server PROGRESS packets) or
  *     run on top of a non-blocking io that polls inside the read.
+ *
+ *  4. A posix read deadline (chc_posix_io_set_deadline) fires as an IO
+ *     timeout that propagates through the buffered reader as CHC_ERR_IO,
+ *     not masked as clean EOF / end-of-stream.
  *
  * Approach: open a pipe & let the test process control when bytes
  * arrive. No external clickhouse-local dependency.
@@ -241,11 +245,50 @@ test_blocked_read_eintr(void) {
     cancel_now = false;
 }
 
+/* (4) Read deadline: chc_posix_io_set_deadline must surface a read timeout
+ *     as CHC_ERR_IO through the buffered reader — not get masked as clean
+ *     EOF / end-of-stream. Pipe stays open (no EOF); the deadline fires. */
+static void
+test_read_deadline(void) {
+    current_test = "read_deadline";
+    int p[2];
+    CHECK(pipe(p) == 0);
+
+    chc_alloc al = chc_alloc_stdlib();
+    chc_posix_io state;
+    chc_io io;
+    chc_posix_io_init(&state, &io, p[0], NULL, NULL);
+
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now_us = (int64_t) ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+    chc_posix_io_set_deadline(&state, now_us + 80 * 1000);   /* +80ms */
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    chc_block_opts opts = {0};
+    chc_block *b = NULL;
+    chc_err err = {0};
+    int rc = chc_block_read(&io, &al, &opts, &b, &err);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000
+                    + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+
+    CHECK_EQ_I64(rc, CHC_ERR_IO);            /* not 0 (clean EOS), not EOF */
+    CHECK(b == NULL);
+    CHECK(strstr(err.msg, "timeout") != NULL);
+    CHECK(elapsed_ms >= 60);                 /* waited ~ the deadline */
+
+    if (b) chc_block_destroy(b, &al);
+    close(p[0]); close(p[1]);
+}
+
 int
 main(void) {
     test_precancel();
     test_cancel_observed_each_refill();
     test_blocked_read_eintr();
+    test_read_deadline();
 
     if (fail_count) {
         fprintf(stderr, "FAIL: %d check(s) failed\n", fail_count);

@@ -11,13 +11,16 @@ the implementation TU pulls OpenSSL in.
 typedef struct ssl_st SSL;
 
 typedef struct chc_openssl_io {
-    SSL  *ssl;
-    bool (*check_cancel)(void *ud);
-    void *cancel_ud;
+    SSL     *ssl;
+    bool   (*check_cancel)(void *ud);
+    void    *cancel_ud;
+    int64_t  deadline_us;   /* absolute CLOCK_MONOTONIC us; 0 disables */
 } chc_openssl_io;
 
 void chc_openssl_io_init(chc_openssl_io *state, chc_io *out_io, SSL *ssl,
                          bool (*check_cancel)(void *), void *cancel_ud);
+
+void chc_openssl_io_set_deadline(chc_openssl_io *state, int64_t deadline_us);
 ```
 
 `state` is caller-owned (typically stack); the filled `chc_io` keeps a
@@ -42,3 +45,17 @@ fires, the handshake must be complete.
 Errors emerge as `CHC_ERR_IO` with an `op: what (detail)` message — `op`
 is `SSL_read` or `SSL_write`, `what` summarises the `SSL_get_error` code,
 detail is `ERR_peek_last_error`'s human-readable text when present.
+
+## Read deadline
+
+`chc_openssl_io_set_deadline` bounds later reads by an absolute
+`CLOCK_MONOTONIC` microsecond timestamp; `0` (the init default) disables it.
+When no decrypted bytes are already buffered (`SSL_pending() == 0`) the
+backend `poll(2)`s the underlying `SSL_get_fd` until readable or the
+deadline; on expiry the read fails with `CHC_ERR_IO` / `read timeout`.
+`EINTR` loops.
+
+Because the wait is on the socket, `SSL_read` may still block briefly after
+poll returns while it assembles the remainder of a TLS record (bounded by
+the max record size). As with the POSIX backend the deadline is absolute and
+shared across reads; set it before each logical operation.
