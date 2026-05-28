@@ -33,17 +33,24 @@ typedef struct chc_openssl_io {
     SSL  *ssl;
     bool (*check_cancel)(void *ud);
     void *cancel_ud;
+    /* Monotonic-us deadline applied to each blocking read. 0 disables. */
+    int64_t deadline_us;
 } chc_openssl_io;
 
 void chc_openssl_io_init(chc_openssl_io *state, chc_io *out_io, SSL *ssl,
                          bool (*check_cancel)(void *), void *cancel_ud);
 
+/* Bound subsequent reads by absolute CLOCK_MONOTONIC microseconds; 0 = none. */
+void chc_openssl_io_set_deadline(chc_openssl_io *state, int64_t deadline_us);
+
 #ifdef CHC_IMPLEMENTATION
 
 #include <errno.h>
 #include <limits.h>
+#include <poll.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -77,6 +84,43 @@ chc__openssl_fail(chc_err *err, SSL *ssl, int ret, int ssl_err, const char *op)
     return chc__err_set(err, CHC_ERR_IO, "%s: %s%s", op, what, detail);
 }
 
+static int64_t
+chc__openssl_now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t) ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+/* Poll underlying fd until readable (or deadline). SSL is on a blocking
+ * fd, so we only poll when no record bytes are already decrypted; once
+ * data is available SSL_read can still block briefly waiting for the
+ * remainder of a record, but record size is bounded so slip is small. */
+static int
+chc__openssl_wait_readable(SSL *ssl, int64_t deadline_us, chc_err *err)
+{
+    if (deadline_us == 0) return CHC_OK;
+    if (SSL_pending(ssl) > 0) return CHC_OK;
+    int fd = SSL_get_fd(ssl);
+    if (fd < 0)
+        return chc__err_set(err, CHC_ERR_IO, "SSL_get_fd: no fd");
+    for (;;) {
+        int64_t now = chc__openssl_now_us();
+        if (now >= deadline_us)
+            return chc__err_set(err, CHC_ERR_IO, "read timeout");
+        int64_t rem_ms = (deadline_us - now + 999) / 1000;
+        if (rem_ms > INT_MAX) rem_ms = INT_MAX;
+        struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+        int pr = poll(&pfd, 1, (int) rem_ms);
+        if (pr > 0) return CHC_OK;
+        if (pr == 0)
+            return chc__err_set(err, CHC_ERR_IO, "read timeout");
+        if (errno == EINTR) continue;
+        return chc__err_set(err, CHC_ERR_IO, "poll(fd=%d): %s",
+                            fd, strerror(errno));
+    }
+}
+
 static int
 chc__openssl_read(void *ud, void *buf, size_t len, size_t *out_n, chc_err *err)
 {
@@ -86,6 +130,8 @@ chc__openssl_read(void *ud, void *buf, size_t len, size_t *out_n, chc_err *err)
     for (;;) {
         if (s->check_cancel && s->check_cancel(s->cancel_ud))
             return chc__err_set(err, CHC_ERR_CANCELLED, "cancelled");
+        int rc = chc__openssl_wait_readable(s->ssl, s->deadline_us, err);
+        if (rc != CHC_OK) return rc;
         ERR_clear_error();
         errno = 0;
         int n = SSL_read(s->ssl, buf, want);
@@ -133,10 +179,17 @@ chc_openssl_io_init(chc_openssl_io *state, chc_io *out_io, SSL *ssl,
     state->ssl          = ssl;
     state->check_cancel = check_cancel;
     state->cancel_ud    = cancel_ud;
+    state->deadline_us  = 0;
     out_io->ud           = state;
     out_io->read         = chc__openssl_read;
     out_io->write        = chc__openssl_write;
     out_io->check_cancel = check_cancel ? chc__openssl_cancel : NULL;
+}
+
+void
+chc_openssl_io_set_deadline(chc_openssl_io *state, int64_t deadline_us)
+{
+    state->deadline_us = deadline_us;
 }
 
 #endif /* CHC_IMPLEMENTATION */
