@@ -558,6 +558,29 @@ chc__realloc(const chc_alloc *al, void *p, size_t old_n, size_t new_n,
     return q;
 }
 
+/* Overflow-checked size multiply for count*elem allocation sizing. False on
+ * wraparound. Guards the size_t multiply done before sizing column buffers
+ * from wire-supplied element counts. */
+#if defined(__has_builtin)
+#  if __has_builtin(__builtin_mul_overflow)
+#    define CHC__HAVE_MUL_OVERFLOW 1
+#  endif
+#elif defined(__GNUC__) && (__GNUC__ >= 5)
+#  define CHC__HAVE_MUL_OVERFLOW 1
+#endif
+
+static bool
+chc__mul_size(size_t a, size_t b, size_t *out)
+{
+#ifdef CHC__HAVE_MUL_OVERFLOW
+    return !__builtin_mul_overflow(a, b, out);
+#else
+    if (a != 0 && b > (size_t) SIZE_MAX / a) return false;
+    *out = a * b;
+    return true;
+#endif
+}
+
 static char *
 chc__strdup(const chc_alloc *al, const char *s, size_t n, chc_err *err)
 {
@@ -689,7 +712,7 @@ chc__in_refill(chc__in *in, chc_err *err)
     in->fill = 0;
     size_t got = 0;
     int rc = in->io->read(in->io->ud, in->buf, in->cap, &got, err);
-    if (rc < 0) {
+    if (rc != CHC_OK) {
         if (err && err->code == 0) chc__err_set(err, CHC_ERR_IO, "read failed");
         return err && err->code ? err->code : CHC_ERR_IO;
     }
@@ -736,7 +759,7 @@ chc__read_bytes(chc__in *in, void *dst, size_t n, chc_err *err)
             return chc__err_set(err, CHC_ERR_CANCELLED, "cancelled");
         size_t got = 0;
         int rc = in->io->read(in->io->ud, p, n, &got, err);
-        if (rc < 0) {
+        if (rc != CHC_OK) {
             if (err && err->code == 0) chc__err_set(err, CHC_ERR_IO, "read failed");
             return err && err->code ? err->code : CHC_ERR_IO;
         }
@@ -1868,9 +1891,14 @@ chc__col_read_fixed(chc__in *in, size_t elem_size, size_t n_rows,
     c->n_rows = n_rows;
     c->u.fixed.elem_size = elem_size;
     if (n_rows && elem_size) {
-        c->u.fixed.data = chc__alloc(al, n_rows * elem_size, err);
+        size_t nbytes;
+        if (!chc__mul_size(n_rows, elem_size, &nbytes)) {
+            chc__column_destroy(c, al);
+            return chc__err_set(err, CHC_ERR_PROTOCOL, "column size overflow");
+        }
+        c->u.fixed.data = chc__alloc(al, nbytes, err);
         if (!c->u.fixed.data) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
-        int rc = chc__read_bytes(in, c->u.fixed.data, n_rows * elem_size, err);
+        int rc = chc__read_bytes(in, c->u.fixed.data, nbytes, err);
         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
     }
     *out = c;
@@ -1887,7 +1915,12 @@ chc__col_read_string(chc__in *in, size_t n_rows,
     c->layout = CHC_COL_STRING;
     c->n_rows = n_rows;
     if (!n_rows) { *out = c; return CHC_OK; }
-    c->u.str.offsets = chc__alloc(al, n_rows * sizeof(uint64_t), err);
+    size_t offs_bytes;
+    if (!chc__mul_size(n_rows, sizeof(uint64_t), &offs_bytes)) {
+        chc__column_destroy(c, al);
+        return chc__err_set(err, CHC_ERR_PROTOCOL, "string column size overflow");
+    }
+    c->u.str.offsets = chc__alloc(al, offs_bytes, err);
     if (!c->u.str.offsets) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
     size_t cap = 256;
     size_t total = 0;
@@ -2049,6 +2082,12 @@ chc__col_read(chc__in *in, const chc_type *t,
             if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
             chc__swap_offsets(c->u.array.offsets, n_rows);
             total = c->u.array.offsets[n_rows - 1];
+            if (total > CHC_MAX_NUM_ROWS) {
+                chc__column_destroy(c, al);
+                return chc__err_set(err, CHC_ERR_PROTOCOL,
+                    "array nested length too large: %llu",
+                    (unsigned long long) total);
+            }
         }
         if (t->kind == CHC_ARRAY) {
             int rc = chc__col_read(in, t->children[0], (size_t) total,
@@ -2149,6 +2188,12 @@ chc__col_read(chc__in *in, const chc_type *t,
         uint64_t dict_n;
         rc = chc__read_u64_le(in, &dict_n, err);
         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
+        if (dict_n > CHC_MAX_NUM_ROWS) {
+            chc__column_destroy(c, al);
+            return chc__err_set(err, CHC_ERR_PROTOCOL,
+                "LowCardinality dictionary too large: %llu",
+                (unsigned long long) dict_n);
+        }
         chc_column *inner_dict = NULL;
         rc = chc__col_read(in, dict_type, (size_t) dict_n, &inner_dict, err);
         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
@@ -2274,6 +2319,12 @@ chc__col_read_geo(chc__in *in, int depth, size_t n_rows,
         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
         chc__swap_offsets(c->u.array.offsets, n_rows);
         total = c->u.array.offsets[n_rows - 1];
+        if (total > CHC_MAX_NUM_ROWS) {
+            chc__column_destroy(c, al);
+            return chc__err_set(err, CHC_ERR_PROTOCOL,
+                "array nested length too large: %llu",
+                (unsigned long long) total);
+        }
     }
     int rc = chc__col_read_geo(in, depth - 1, (size_t) total,
                                &c->u.array.values, err);

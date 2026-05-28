@@ -755,6 +755,53 @@ static void test_type_parse_roundtrip(void) {
     }
 }
 
+/* In-memory chc_io over a fixed byte buffer — feeds crafted bytes to the
+ * decoder without a live server. */
+typedef struct { const uint8_t *buf; size_t len, pos; } memio;
+static int memio_read(void *ud, void *dst, size_t len, size_t *out_n, chc_err *err) {
+    (void) err;
+    memio *m = ud;
+    size_t avail = m->len - m->pos;
+    size_t take = len < avail ? len : avail;
+    memcpy(dst, m->buf + m->pos, take);
+    m->pos += take;
+    *out_n = take;
+    return CHC_OK;
+}
+static int memio_write(void *ud, const void *p, size_t n, chc_err *err) {
+    (void) ud; (void) p; (void) n; (void) err; return -1;
+}
+
+/*
+ * 30-byte malformed Array(String): 1 col, 1 row, with an array offset whose
+ * nested leaf count is ~2^61. Pre-fix, chc__col_read_string sized its offset
+ * buffer at n_rows*8 — which wrapped size_t to a tiny alloc, then wrote ~2^61
+ * entries past it (heap overflow, confirmed under ASan). The nested-length
+ * bound must reject it before allocating.
+ */
+static void test_invalid_array_overflow(void) {
+    current_test = "invalid_array_overflow";
+    static const uint8_t bytes[30] = {
+        0x01,                                /* n_columns = 1 */
+        0x01,                                /* n_rows = 1 */
+        0x01, 'a',                           /* column name "a" */
+        0x0D, 'A','r','r','a','y','(','S','t','r','i','n','g',')',  /* "Array(String)" */
+        0x02,0,0,0,0,0,0,0x20,               /* offsets[0] = 0x2000000000000002 */
+        0,0,0,0,                             /* trailing string-length varuints */
+    };
+    memio m = { bytes, sizeof bytes, 0 };
+    chc_io io = { &m, memio_read, memio_write, NULL };
+    chc_alloc al = chc_alloc_stdlib();
+    chc_block_opts opts = {0};
+    chc_block *b = NULL;
+    chc_err err = {0};
+    int rc = chc_block_read(&io, &al, &opts, &b, &err);
+    CHECK(rc == CHC_ERR_PROTOCOL);
+    CHECK(b == NULL);
+    CHECK(strstr(err.msg, "too large") != NULL);
+    if (b) free_block(b);
+}
+
 int main(void) {
     test_type_parse_roundtrip();
     test_named_tuple_parser();
@@ -777,6 +824,7 @@ int main(void) {
     test_json_string();
     test_json_wrong_version();
     test_column_validate();
+    test_invalid_array_overflow();
 
     if (fail_count) {
         fprintf(stderr, "FAIL: %d check(s) failed\n", fail_count);

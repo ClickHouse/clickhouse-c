@@ -10,13 +10,16 @@ Exactly one TU defines `CHC_IMPLEMENTATION` before including. Depends on
 
 ```c
 typedef struct chc_posix_io {
-    int   fd;
-    bool (*check_cancel)(void *ud);
-    void *cancel_ud;
+    int      fd;
+    bool   (*check_cancel)(void *ud);
+    void    *cancel_ud;
+    int64_t  deadline_us;   /* absolute CLOCK_MONOTONIC us; 0 disables */
 } chc_posix_io;
 
 void chc_posix_io_init(chc_posix_io *state, chc_io *out_io, int fd,
                        bool (*check_cancel)(void *), void *cancel_ud);
+
+void chc_posix_io_set_deadline(chc_posix_io *state, int64_t deadline_us);
 ```
 
 `state` is caller-owned (typically stack); the filled `chc_io` references
@@ -31,3 +34,15 @@ Caller is responsible for `socket()`, `connect()`, `setsockopt`, timeouts,
 non-blocking mode, etc. — same posture as `clickhouse-openssl.h`. For
 non-blocking sockets, callers wanting `WaitLatchOrSocket`/`epoll` should
 roll their own `chc_io` rather than use this header.
+
+## Read deadline
+
+`chc_posix_io_set_deadline` bounds later reads by an absolute
+`CLOCK_MONOTONIC` microsecond timestamp; `0` (the init default) disables it.
+Before each blocking `read(2)` the backend `poll(2)`s the fd until readable
+or the deadline passes; on expiry the read fails with `CHC_ERR_IO` & a
+`read timeout` message. `EINTR` during the wait is looped; `write` is not
+bounded.
+
+Deadline is absolute & shared across reads until changed. Set before each
+logical operation (e.g. a packet read).

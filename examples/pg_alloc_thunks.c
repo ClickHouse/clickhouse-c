@@ -101,7 +101,7 @@ const chc_alloc pg_chc_alloc = {
  *     .client_name = "pg_clickhouse", .user = "default", .database = "default",
  *     .compression = CHC_COMP_LZ4, .codec = &lz4_codec,
  * };
- * if (chc_client_init(&client, &opts, &pg_chc_alloc, &io, &err) < 0) {
+ * if (chc_client_init(&client, &opts, &pg_chc_alloc, &io, &err) != CHC_OK) {
  *     MemoryContextSwitchTo(old);
  *     ereport(ERROR,
  *             (errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
