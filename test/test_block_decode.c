@@ -664,6 +664,50 @@ static void test_json_wrong_version(void) {
     if (b) free_block(b);
 }
 
+/*
+ * chc_column_validate is opt-in. Decode known-good columns & confirm pass,
+ * then tamper offsets / LC keys via cast-away-const to confirm both
+ * invariants fire. Mirrors what ClickHouse itself enforces server-side
+ * (SerializationArray.cpp:444, ColumnLowCardinality.cpp:255).
+ */
+static void test_column_validate(void) {
+    current_test = "column_validate";
+    chc_block *b = read_one_block(
+        "SELECT cast([[1,2,3],[],[7,8]][number+1], 'Array(UInt8)') AS arr, "
+        "cast(['hi','bye','hi','hi','bye'][number+1], 'LowCardinality(String)') AS lc "
+        "FROM numbers(3)");
+    CHECK(b != NULL); if (!b) return;
+
+    const chc_column *arr = chc_block_column(b, 0);
+    const chc_column *lc  = chc_block_column(b, 1);
+
+    chc_err err = {0};
+    CHECK_EQ_U64(chc_column_validate(arr, &err), CHC_OK);
+    CHECK_EQ_U64(chc_column_validate(lc, &err), CHC_OK);
+    CHECK_EQ_U64(chc_column_validate(NULL, &err), CHC_OK);
+
+    /* Force a non-monotonic offset & confirm CHC_ERR_PROTOCOL with a reason. */
+    uint64_t *offs = (uint64_t *) chc_column_array_offsets(arr);
+    uint64_t saved = offs[1];
+    offs[1] = 1;  /* offs[0]=3, offs[1]=1 < 3 */
+    err = (chc_err) {0};
+    CHECK_EQ_U64(chc_column_validate(arr, &err), CHC_ERR_PROTOCOL);
+    CHECK(strstr(err.msg, "monotonic") != NULL);
+    offs[1] = saved;
+
+    /* Force an LC key past dict_n. key_size is 1 byte here; dict_n is 3
+     * (default + 'hi' + 'bye'). */
+    uint8_t *keys = (uint8_t *) chc_column_lc_keys(lc);
+    uint8_t saved_k = keys[0];
+    keys[0] = 99;
+    err = (chc_err) {0};
+    CHECK_EQ_U64(chc_column_validate(lc, &err), CHC_ERR_PROTOCOL);
+    CHECK(strstr(err.msg, "out of range") != NULL);
+    keys[0] = saved_k;
+
+    free_block(b);
+}
+
 static void test_type_parse_roundtrip(void) {
     current_test = "type_parse_roundtrip";
     const char *types[] = {
@@ -732,6 +776,7 @@ int main(void) {
     test_multipolygon();
     test_json_string();
     test_json_wrong_version();
+    test_column_validate();
 
     if (fail_count) {
         fprintf(stderr, "FAIL: %d check(s) failed\n", fail_count);

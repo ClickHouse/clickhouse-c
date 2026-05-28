@@ -199,6 +199,20 @@ int               chc_column_lc_key_size(const chc_column *c);
 const void       *chc_column_lc_keys(const chc_column *c);
 const chc_column *chc_column_lc_dict(const chc_column *c);
 
+/* Walk a column tree & enforce cross-field invariants the server itself
+ * enforces on its native deserialization path:
+ *   - Array offsets non-decreasing (SerializationArray.cpp:444, throws
+ *     "Arrays offsets are not monotonically increasing")
+ *   - LowCardinality keys < dict size (ColumnLowCardinality.cpp:255, throws
+ *     "Index for LowCardinality is out of range")
+ * chc_block_read does NOT call this automatically — a peer that forges
+ * offsets or LC keys can cause callers to read past inner-column bounds.
+ * Consumers ingesting from untrusted senders should call this on each
+ * block column before traversing it. Returns CHC_OK on success, or
+ * CHC_ERR_PROTOCOL with a reason in err on the first violation. NULL c
+ * is treated as OK. */
+int chc_column_validate(const chc_column *c, chc_err *err);
+
 /* -------------------------------------------------------------------------- */
 /* Block reader                                                               */
 /* -------------------------------------------------------------------------- */
@@ -1724,6 +1738,57 @@ chc__column_destroy(chc_column *c, const chc_alloc *al)
         break;
     }
     al->free(al->ud, c, sizeof *c);
+}
+
+int
+chc_column_validate(const chc_column *c, chc_err *err)
+{
+    if (!c) return CHC_OK;
+    switch (c->layout) {
+    case CHC_COL_ARRAY: {
+        const uint64_t *offs = c->u.array.offsets;
+        uint64_t prev = 0;
+        for (size_t i = 0; i < c->n_rows; i++) {
+            if (offs[i] < prev)
+                return chc__err_set(err, CHC_ERR_PROTOCOL,
+                    "array offsets not monotonic at row %zu: %llu < %llu",
+                    i, (unsigned long long) offs[i], (unsigned long long) prev);
+            prev = offs[i];
+        }
+        return chc_column_validate(c->u.array.values, err);
+    }
+    case CHC_COL_LOW_CARDINALITY: {
+        size_t dn = c->u.lc.dict_n;
+        const void *k = c->u.lc.keys;
+        for (size_t i = 0; i < c->n_rows; i++) {
+            uint64_t v;
+            switch (c->u.lc.key_size) {
+            case 1: v = ((const uint8_t  *) k)[i]; break;
+            case 2: v = ((const uint16_t *) k)[i]; break;
+            case 4: v = ((const uint32_t *) k)[i]; break;
+            case 8: v = ((const uint64_t *) k)[i]; break;
+            default:
+                return chc__err_set(err, CHC_ERR_PROTOCOL,
+                    "LowCardinality: invalid key_size %d", c->u.lc.key_size);
+            }
+            if (v >= dn)
+                return chc__err_set(err, CHC_ERR_PROTOCOL,
+                    "LowCardinality key out of range at row %zu: %llu >= dict_n %zu",
+                    i, (unsigned long long) v, dn);
+        }
+        return chc_column_validate(c->u.lc.dict, err);
+    }
+    case CHC_COL_NULLABLE:
+        return chc_column_validate(c->u.nullable.inner, err);
+    case CHC_COL_TUPLE:
+        for (size_t i = 0; i < c->u.tuple.arity; i++) {
+            int rc = chc_column_validate(c->u.tuple.children[i], err);
+            if (rc != CHC_OK) return rc;
+        }
+        return CHC_OK;
+    default:
+        return CHC_OK;
+    }
 }
 
 /* -------- column reader (recursive on type kind) ---------- */
