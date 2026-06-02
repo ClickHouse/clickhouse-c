@@ -2,7 +2,11 @@ name: test
 
 on:
   push:
+    branches: [main, wip/**]
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   test:
