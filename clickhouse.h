@@ -20,6 +20,62 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* -------------------------------------------------------------------------- */
+/* C23 portability shim                                                       */
+/* -------------------------------------------------------------------------- */
+/* Macros use C23 features when available, degrading to GNU/builtin equivalent,
+ * then to harmless nop, so consumers may build under any -std >= c11 */
+
+#if defined(__has_c_attribute)
+#  define CHC__HAS_ATTR(x) __has_c_attribute(x)
+#else
+#  define CHC__HAS_ATTR(x) 0
+#endif
+
+#if CHC__HAS_ATTR(nodiscard)
+#  define CHC_NODISCARD [[nodiscard]]
+#elif defined(__GNUC__) || defined(__clang__)
+#  define CHC_NODISCARD __attribute__((warn_unused_result))
+#else
+#  define CHC_NODISCARD
+#endif
+
+#if CHC__HAS_ATTR(maybe_unused)
+#  define CHC_MAYBE_UNUSED [[maybe_unused]]
+#elif defined(__GNUC__) || defined(__clang__)
+#  define CHC_MAYBE_UNUSED __attribute__((unused))
+#else
+#  define CHC_MAYBE_UNUSED
+#endif
+
+#if CHC__HAS_ATTR(deprecated)
+#  define CHC_DEPRECATED(msg) [[deprecated(msg)]]
+#elif defined(__GNUC__) || defined(__clang__)
+#  define CHC_DEPRECATED(msg) __attribute__((deprecated(msg)))
+#else
+#  define CHC_DEPRECATED(msg)
+#endif
+
+#if CHC__HAS_ATTR(unsequenced)
+#  define CHC_UNSEQUENCED [[unsequenced]]
+#else
+#  define CHC_UNSEQUENCED
+#endif
+
+#if CHC__HAS_ATTR(reproducible)
+#  define CHC_REPRODUCIBLE [[reproducible]]
+#else
+#  define CHC_REPRODUCIBLE
+#endif
+
+/* ckd_mul (C23 <stdckdint.h>) backs chc__mul_size; see CHC__HAVE_CKD_MUL. */
+#if defined(__has_include)
+#  if __has_include(<stdckdint.h>)
+#    include <stdckdint.h>
+#    define CHC__HAVE_CKD_MUL 1
+#  endif
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -114,7 +170,7 @@ typedef enum chc_kind {
 
 typedef struct chc_type chc_type;
 
-int  chc_type_parse(const char *name, size_t name_len,
+CHC_NODISCARD int  chc_type_parse(const char *name, size_t name_len,
                     const chc_alloc *al, chc_type **out, chc_err *err);
 void chc_type_destroy(chc_type *t, const chc_alloc *al);
 
@@ -211,7 +267,7 @@ const chc_column *chc_column_lc_dict(const chc_column *c);
  * block column before traversing it. Returns CHC_OK on success, or
  * CHC_ERR_PROTOCOL with a reason in err on the first violation. NULL c
  * is treated as OK. */
-int chc_column_validate(const chc_column *c, chc_err *err);
+CHC_NODISCARD int chc_column_validate(const chc_column *c, chc_err *err);
 
 /* -------------------------------------------------------------------------- */
 /* Block reader                                                               */
@@ -235,7 +291,7 @@ typedef struct chc_block_opts {
 
 /* Read one block. On clean EOF at a block boundary (no bytes consumed),
  * returns 0 with *out = NULL. On error returns CHC_ERR_* and fills err. */
-int  chc_block_read(chc_io *io, const chc_alloc *al,
+CHC_NODISCARD int  chc_block_read(chc_io *io, const chc_alloc *al,
                     const chc_block_opts *opts,
                     chc_block **out, chc_err *err);
 
@@ -257,7 +313,7 @@ int32_t chc_block_bucket_num(const chc_block *b);
 
 typedef struct chc_block_builder chc_block_builder;
 
-int  chc_block_builder_init(chc_block_builder **out, const chc_alloc *al,
+CHC_NODISCARD int  chc_block_builder_init(chc_block_builder **out, const chc_alloc *al,
                             chc_err *err);
 void chc_block_builder_destroy(chc_block_builder *bb);
 
@@ -265,13 +321,13 @@ void chc_block_builder_destroy(chc_block_builder *bb);
  * (exclusive ends, host byte order). For fixed columns, data is n_rows *
  * elem_size little-endian bytes. None of the slabs are copied; they must
  * outlive chc_block_write. */
-int  chc_block_builder_append_fixed(chc_block_builder *bb,
+CHC_NODISCARD int  chc_block_builder_append_fixed(chc_block_builder *bb,
                                     const char *name, size_t name_len,
                                     const chc_type *t,
                                     const void *data, size_t n_rows,
                                     chc_err *err);
 
-int  chc_block_builder_append_string(chc_block_builder *bb,
+CHC_NODISCARD int  chc_block_builder_append_string(chc_block_builder *bb,
                                      const char *name, size_t name_len,
                                      const uint64_t *offsets,
                                      const uint8_t *data, size_t n_rows,
@@ -287,7 +343,7 @@ int  chc_block_builder_append_string(chc_block_builder *bb,
  *
  * Nested arrays (Array(Array(T))) and Tuple columns are not exposed yet —
  * add when a consumer asks. */
-int  chc_block_builder_append_nullable_fixed(
+CHC_NODISCARD int  chc_block_builder_append_nullable_fixed(
         chc_block_builder *bb,
         const char *name, size_t name_len,
         const chc_type *t,
@@ -295,7 +351,7 @@ int  chc_block_builder_append_nullable_fixed(
         const void    *inner_data,
         size_t         n_rows, chc_err *err);
 
-int  chc_block_builder_append_nullable_string(
+CHC_NODISCARD int  chc_block_builder_append_nullable_string(
         chc_block_builder *bb,
         const char *name, size_t name_len,
         const chc_type *t,
@@ -304,7 +360,7 @@ int  chc_block_builder_append_nullable_string(
         const uint8_t  *inner_data,
         size_t          n_rows, chc_err *err);
 
-int  chc_block_builder_append_array_fixed(
+CHC_NODISCARD int  chc_block_builder_append_array_fixed(
         chc_block_builder *bb,
         const char *name, size_t name_len,
         const chc_type *t,
@@ -312,7 +368,7 @@ int  chc_block_builder_append_array_fixed(
         const void     *values,
         size_t          n_rows, chc_err *err);
 
-int  chc_block_builder_append_array_string(
+CHC_NODISCARD int  chc_block_builder_append_array_string(
         chc_block_builder *bb,
         const char *name, size_t name_len,
         const chc_type *t,
@@ -326,7 +382,7 @@ int  chc_block_builder_append_array_string(
  * is ndim cumulative-end arrays ordered outer-to-inner, level_offsets_len
  * gives count at each level. n_rows is top-level row count, must equal
  * level_offsets_len[0] */
-int  chc_block_builder_append_array_nested_fixed(
+CHC_NODISCARD int  chc_block_builder_append_array_nested_fixed(
         chc_block_builder *bb,
         const char *name, size_t name_len,
         const chc_type *t,
@@ -336,7 +392,7 @@ int  chc_block_builder_append_array_nested_fixed(
         const void               *values,
         size_t                    n_rows, chc_err *err);
 
-int  chc_block_builder_append_array_nested_string(
+CHC_NODISCARD int  chc_block_builder_append_array_nested_string(
         chc_block_builder *bb,
         const char *name, size_t name_len,
         const chc_type *t,
@@ -355,7 +411,7 @@ int  chc_block_builder_append_array_nested_string(
  * version prefix (value 1) once before the same wire format as
  * chc_block_builder_append_string. Caller is responsible for the input
  * being valid JSON; server rejects malformed documents at INSERT time. */
-int  chc_block_builder_append_json_string(
+CHC_NODISCARD int  chc_block_builder_append_json_string(
         chc_block_builder *bb,
         const char *name, size_t name_len,
         const chc_type *t,                /* CHC_JSON */
@@ -363,7 +419,7 @@ int  chc_block_builder_append_json_string(
         const uint8_t  *data,
         size_t n_rows, chc_err *err);
 
-int  chc_block_builder_append_low_cardinality_string(
+CHC_NODISCARD int  chc_block_builder_append_low_cardinality_string(
         chc_block_builder *bb,
         const char *name, size_t name_len,
         const chc_type *t,
@@ -374,7 +430,7 @@ int  chc_block_builder_append_low_cardinality_string(
         size_t          dict_n,
         size_t          n_rows, chc_err *err);
 
-int  chc_block_write(chc_io *io, const chc_block_builder *bb,
+CHC_NODISCARD int  chc_block_write(chc_io *io, const chc_block_builder *bb,
                      const chc_block_opts *opts, chc_err *err);
 
 /* ========================================================================== */
@@ -426,7 +482,7 @@ static inline uint64_t chc__bswap64(uint64_t v) {
  * 128-bit driver used by compressed-frame checksums sits in
  * clickhouse-compression.h and builds on these helpers. */
 
-static uint64_t chc__city_fetch64(const char *p)
+static uint64_t chc__city_fetch64(const char *p) CHC_REPRODUCIBLE
 {
     uint64_t v;
     memcpy(&v, p, 8);
@@ -436,7 +492,7 @@ static uint64_t chc__city_fetch64(const char *p)
     return v;
 }
 
-static uint32_t chc__city_fetch32(const char *p)
+static uint32_t chc__city_fetch32(const char *p) CHC_REPRODUCIBLE
 {
     uint32_t v;
     memcpy(&v, p, 4);
@@ -451,14 +507,14 @@ static const uint64_t chc__city_k1 = 0xb492b66fbe98f273ULL;
 static const uint64_t chc__city_k2 = 0x9ae16a3b2f90404fULL;
 static const uint64_t chc__city_k3 = 0xc949d7c7509e6557ULL;
 
-static uint64_t chc__city_rotate_at_least_1(uint64_t v, int s)
+static uint64_t chc__city_rotate_at_least_1(uint64_t v, int s) CHC_UNSEQUENCED
 {
     return (v >> s) | (v << (64 - s));
 }
 
-static uint64_t chc__city_shift_mix(uint64_t v) { return v ^ (v >> 47); }
+static uint64_t chc__city_shift_mix(uint64_t v) CHC_UNSEQUENCED { return v ^ (v >> 47); }
 
-static uint64_t chc__city_hash128_to_64(uint64_t lo, uint64_t hi)
+static uint64_t chc__city_hash128_to_64(uint64_t lo, uint64_t hi) CHC_UNSEQUENCED
 {
     const uint64_t kMul = 0x9ddfea08eb382d69ULL;
     uint64_t a = (lo ^ hi) * kMul;
@@ -469,12 +525,12 @@ static uint64_t chc__city_hash128_to_64(uint64_t lo, uint64_t hi)
     return b;
 }
 
-static uint64_t chc__city_hash_len_16(uint64_t u, uint64_t v)
+static uint64_t chc__city_hash_len_16(uint64_t u, uint64_t v) CHC_UNSEQUENCED
 {
     return chc__city_hash128_to_64(u, v);
 }
 
-static uint64_t chc__city_hash_len_0_to_16(const char *s, size_t len)
+static uint64_t chc__city_hash_len_0_to_16(const char *s, size_t len) CHC_REPRODUCIBLE
 {
     if (len > 8) {
         uint64_t a = chc__city_fetch64(s);
@@ -558,9 +614,7 @@ chc__realloc(const chc_alloc *al, void *p, size_t old_n, size_t new_n,
     return q;
 }
 
-/* Overflow-checked size multiply for count*elem allocation sizing. False on
- * wraparound. Guards the size_t multiply done before sizing column buffers
- * from wire-supplied element counts. */
+/* Overflow-checked size multiply for count*elem allocation sizing. Matches ckd_mul. */
 #if defined(__has_builtin)
 #  if __has_builtin(__builtin_mul_overflow)
 #    define CHC__HAVE_MUL_OVERFLOW 1
@@ -572,12 +626,13 @@ chc__realloc(const chc_alloc *al, void *p, size_t old_n, size_t new_n,
 static bool
 chc__mul_size(size_t a, size_t b, size_t *out)
 {
-#ifdef CHC__HAVE_MUL_OVERFLOW
-    return !__builtin_mul_overflow(a, b, out);
+#if defined(CHC__HAVE_CKD_MUL)
+    return ckd_mul(out, a, b);
+#elif defined(CHC__HAVE_MUL_OVERFLOW)
+    return __builtin_mul_overflow(a, b, out);
 #else
-    if (a != 0 && b > (size_t) SIZE_MAX / a) return false;
     *out = a * b;
-    return true;
+    return a != 0 && b > (size_t) SIZE_MAX / a;
 #endif
 }
 
@@ -600,21 +655,21 @@ static char *
 chc__strdup_unquote(const chc_alloc *al, const char *s, size_t n, char quote,
                     size_t *out_len, chc_err *err)
 {
-    char *p = chc__alloc(al, n + 1, err);
-    if (!p) return NULL;
+    /* n is an upper bound; escapes shrink it */
     size_t o = 0;
     for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\\' && i + 1 < n) { i++; o++; continue; }
+        if (s[i] == quote && i + 1 < n && s[i + 1] == quote) { i++; o++; continue; }
+        o++;
+    }
+    char *p = chc__alloc(al, o + 1, err);
+    if (!p) return NULL;
+    size_t j = 0;
+    for (size_t i = 0; i < n; i++) {
         char c = s[i];
-        if (c == '\\' && i + 1 < n) {
-            p[o++] = s[++i];
-            continue;
-        }
-        if (c == quote && i + 1 < n && s[i + 1] == quote) {
-            p[o++] = quote;
-            i++;
-            continue;
-        }
-        p[o++] = c;
+        if (c == '\\' && i + 1 < n) { p[j++] = s[++i]; continue; }
+        if (c == quote && i + 1 < n && s[i + 1] == quote) { p[j++] = quote; i++; continue; }
+        p[j++] = c;
     }
     p[o] = '\0';
     *out_len = o;
@@ -623,12 +678,21 @@ chc__strdup_unquote(const chc_alloc *al, const char *s, size_t n, char quote,
 
 #ifdef CHC_PROVIDE_STDLIB_ALLOC
 #include <stdlib.h>
-static void *chc__std_alloc(void *ud, size_t n)
-    { (void) ud; return malloc(n); }
-static void *chc__std_realloc(void *ud, void *p, size_t o, size_t n)
-    { (void) ud; (void) o; return realloc(p, n); }
-static void  chc__std_free(void *ud, void *p, size_t b)
-    { (void) ud; (void) b; free(p); }
+static void *chc__std_alloc(CHC_MAYBE_UNUSED void *ud, size_t n)
+    { return malloc(n); }
+static void *chc__std_realloc(CHC_MAYBE_UNUSED void *ud, void *p,
+                              CHC_MAYBE_UNUSED size_t o, size_t n)
+    { return realloc(p, n); }
+static void  chc__std_free(CHC_MAYBE_UNUSED void *ud, void *p,
+                           CHC_MAYBE_UNUSED size_t b)
+{
+#if defined(__STDC_VERSION_STDLIB_H__) \
+    && __STDC_VERSION_STDLIB_H__ >= 202311L
+    free_sized(p, b);
+#else
+    free(p);
+#endif
+}
 chc_alloc chc_alloc_stdlib(void) {
     chc_alloc a = { NULL, chc__std_alloc, chc__std_realloc, chc__std_free };
     return a;
@@ -1345,7 +1409,7 @@ static const struct chc__name_row chc__name_table[CHC__NAME_TABLE_M] = {
  * the sentinel for unknown names; caller disambiguates with an explicit
  * memcmp against "Void". */
 static chc_kind
-chc__name_to_kind(const char *s, size_t n)
+chc__name_to_kind(const char *s, size_t n) CHC_REPRODUCIBLE
 {
     if (n == 0 || n > 23) return CHC_VOID;
     size_t h_len = n < 16 ? n : 16;
@@ -1674,7 +1738,6 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
     if (!t->name) { chc_type_destroy(t, al); return CHC_ERR_OOM; }
     t->name_len = (size_t) (name_end - name_start);
 
-    (void) whole_start; (void) whole_end;
     *out = t;
     return CHC_OK;
 }
@@ -1892,7 +1955,7 @@ chc__col_read_fixed(chc__in *in, size_t elem_size, size_t n_rows,
     c->u.fixed.elem_size = elem_size;
     if (n_rows && elem_size) {
         size_t nbytes;
-        if (!chc__mul_size(n_rows, elem_size, &nbytes)) {
+        if (chc__mul_size(n_rows, elem_size, &nbytes)) {
             chc__column_destroy(c, al);
             return chc__err_set(err, CHC_ERR_PROTOCOL, "column size overflow");
         }
@@ -1916,7 +1979,7 @@ chc__col_read_string(chc__in *in, size_t n_rows,
     c->n_rows = n_rows;
     if (!n_rows) { *out = c; return CHC_OK; }
     size_t offs_bytes;
-    if (!chc__mul_size(n_rows, sizeof(uint64_t), &offs_bytes)) {
+    if (chc__mul_size(n_rows, sizeof(uint64_t), &offs_bytes)) {
         chc__column_destroy(c, al);
         return chc__err_set(err, CHC_ERR_PROTOCOL, "string column size overflow");
     }
@@ -1987,17 +2050,16 @@ static int chc__col_read_geo(chc__in *in, int depth, size_t n_rows,
 
 /* Byte-swap a host-typed uint64/keys array in place on BE hosts. No-op on LE. */
 static void
-chc__swap_offsets(uint64_t *p, size_t n)
+chc__swap_offsets(CHC_MAYBE_UNUSED uint64_t *p, CHC_MAYBE_UNUSED size_t n)
 {
 #if CHC_BIG_ENDIAN
     for (size_t i = 0; i < n; i++) p[i] = chc__bswap64(p[i]);
-#else
-    (void) p; (void) n;
 #endif
 }
 
 static void
-chc__swap_keys(void *p, size_t n, int key_size)
+chc__swap_keys(CHC_MAYBE_UNUSED void *p, CHC_MAYBE_UNUSED size_t n,
+               CHC_MAYBE_UNUSED int key_size)
 {
 #if CHC_BIG_ENDIAN
     switch (key_size) {
@@ -2006,8 +2068,6 @@ chc__swap_keys(void *p, size_t n, int key_size)
     case 4: { uint32_t *a = p; for (size_t i = 0; i < n; i++) a[i] = chc__bswap32(a[i]); break; }
     case 8: { uint64_t *a = p; for (size_t i = 0; i < n; i++) a[i] = chc__bswap64(a[i]); break; }
     }
-#else
-    (void) p; (void) n; (void) key_size;
 #endif
 }
 
