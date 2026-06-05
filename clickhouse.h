@@ -93,7 +93,8 @@ enum {
     CHC_ERR_OOM,
     CHC_ERR_CANCELLED,
     CHC_ERR_SERVER,
-    CHC_ERR_USAGE
+    CHC_ERR_USAGE,
+    CHC_WOULD_BLOCK
 };
 
 #ifndef CHC_ERR_MSG_LEN
@@ -140,6 +141,26 @@ typedef struct chc_io {
     int (*write)(void *ud, const void *buf, size_t len, chc_err *err);
     int (*check_cancel)(void *ud);
 } chc_io;
+
+/* -------------------------------------------------------------------------- */
+/* Buffered reader                                                            */
+/* -------------------------------------------------------------------------- */
+
+/* Buffered input parser pulls from. Two modes:
+ *  - io-backed (chc_in_init): refills from a chc_io, for blocking io.
+ *  - ioless (chc_in_init_ioless): bytes received via chc_in_submit;
+ *    reading past submitted bytes returns CHC_WOULD_BLOCK, leaving
+ *    in-progress parse to be retried once more bytes arrive. */
+typedef struct chc_in chc_in;
+
+CHC_NODISCARD int    chc_in_init(chc_in *in, chc_io *io, const chc_alloc *al,
+                                 size_t cap, chc_err *err);
+CHC_NODISCARD int    chc_in_init_ioless(chc_in *in, const chc_alloc *al);
+CHC_NODISCARD int    chc_in_submit(chc_in *in, const void *buf, size_t len,
+                                 chc_err *err);
+size_t               chc_in_available(const chc_in *in); /* unconsumed bytes */
+void                 chc_in_reset(chc_in *in);   /* drop consumed, compact */
+void                 chc_in_free(chc_in *in);
 
 /* -------------------------------------------------------------------------- */
 /* Type AST                                                                   */
@@ -726,8 +747,9 @@ chc_alloc chc_alloc_stdlib(void) {
 #define CHC_MAX_TYPE_DEPTH        300
 #endif
 
-typedef struct chc__in {
-    chc_io          *io;
+/* Public typedef in the declarations section; struct body is internal. */
+struct chc_in {
+    chc_io          *io;        /* NULL => ioless  */
     const chc_alloc *al;
     uint8_t         *buf;
     size_t           cap;
@@ -735,10 +757,11 @@ typedef struct chc__in {
     size_t           fill;      /* bytes valid in buf */
     bool             eof;
     uint64_t         consumed;  /* total bytes returned to caller */
-} chc__in;
+    size_t           mark;      /* rewind target; SIZE_MAX when unset */
+};
 
-static int
-chc__in_init(chc__in *in, chc_io *io, const chc_alloc *al,
+int
+chc_in_init(chc_in *in, chc_io *io, const chc_alloc *al,
              size_t cap, chc_err *err)
 {
     if (cap == 0) cap = CHC_READ_BUFFER;
@@ -751,22 +774,120 @@ chc__in_init(chc__in *in, chc_io *io, const chc_alloc *al,
     in->fill = 0;
     in->eof = false;
     in->consumed = 0;
+    in->mark = SIZE_MAX;
     return CHC_OK;
 }
 
+int
+chc_in_init_ioless(chc_in *in, const chc_alloc *al)
+{
+    in->io = NULL;
+    in->al = al;
+    in->buf = NULL;             /* grown lazily on first feed */
+    in->cap = 0;
+    in->pos = 0;
+    in->fill = 0;
+    in->eof = false;
+    in->consumed = 0;
+    in->mark = SIZE_MAX;
+    return CHC_OK;
+}
+
+/* Drop prefix [0, keep): keep = mark when a checkpoint is live, else pos.
+ * consumed counts returned bytes, not offsets, so compaction leaves it be;
+ * mark and pos shift together so (pos - mark) survives for rewind. */
 static void
-chc__in_free(chc__in *in)
+chc__in_compact(chc_in *in)
+{
+    size_t keep = in->mark == SIZE_MAX ? in->pos : in->mark;
+    if (keep == 0) return;
+    size_t live = in->fill - keep;
+    if (live) memmove(in->buf, in->buf + keep, live);
+    in->fill -= keep;
+    in->pos  -= keep;
+    if (in->mark != SIZE_MAX) in->mark -= keep;
+}
+
+int
+chc_in_submit(chc_in *in, const void *buf, size_t len, chc_err *err)
+{
+    if (in->io)
+        return chc__err_set(err, CHC_ERR_USAGE, "chc_in_submit on io-backed reader");
+    if (len == 0) return CHC_OK;
+    chc__in_compact(in);
+    if (in->fill + len > in->cap) {
+        size_t ncap = in->cap ? in->cap : CHC_READ_BUFFER;
+        while (ncap < in->fill + len) {
+            if (ncap > SIZE_MAX / 2) { ncap = in->fill + len; break; }
+            ncap *= 2;
+        }
+        uint8_t *nb = chc__realloc(in->al, in->buf, in->cap, ncap, err);
+        if (!nb) return CHC_ERR_OOM;
+        in->buf = nb;
+        in->cap = ncap;
+    }
+    memcpy(in->buf + in->fill, buf, len);
+    in->fill += len;
+    return CHC_OK;
+}
+
+size_t
+chc_in_available(const chc_in *in)
+{
+    return in->fill - in->pos;
+}
+
+void
+chc_in_reset(chc_in *in)
+{
+    /* Drop consumed bytes [0, pos), keep [pos, fill). Clears any checkpoint;
+     * callers reset at packet boundaries, never mid-parse. */
+    in->mark = SIZE_MAX;
+    if (in->pos == 0) return;
+    size_t live = in->fill - in->pos;
+    if (live) memmove(in->buf, in->buf + in->pos, live);
+    in->fill = live;
+    in->pos = 0;
+}
+
+void
+chc_in_free(chc_in *in)
 {
     in->al->free(in->al->ud, in->buf, in->cap);
     in->buf = NULL;
 }
 
+/* Mark read cursor as rewind target. Ioless checkpoints at a packet
+ * boundary so a mid-parse CHC_WOULD_BLOCK can rewind and re-parse once more bytes arrive. */
+CHC_MAYBE_UNUSED static void
+chc__in_checkpoint(chc_in *in)
+{
+    in->mark = in->pos;
+}
+
+/* Restore the cursor to the last checkpoint, un-counting bytes consumed
+ * since it (so consumed stays equal to an io-backed read of the same
+ * stream). Clears the mark. */
+CHC_MAYBE_UNUSED static int
+chc__in_rewind(chc_in *in)
+{
+    if (in->mark == SIZE_MAX)
+        return CHC_ERR_USAGE;
+    in->consumed -= in->pos - in->mark;
+    in->pos = in->mark;
+    in->mark = SIZE_MAX;
+    return CHC_OK;
+}
+
 /* Refill buf with at least one byte. Returns 0 on success, CHC_ERR_EOF on
- * clean EOF, CHC_ERR_IO/CANCELLED on failure. */
+ * clean EOF, CHC_ERR_IO/CANCELLED on failure.
+ * Returns CHC_WOULD_BLOCK when not CHC_OK in ioless. */
 static int
-chc__in_refill(chc__in *in, chc_err *err)
+chc__in_refill(chc_in *in, chc_err *err)
 {
     if (in->pos < in->fill) return CHC_OK;
+    if (in->io == NULL)
+        return chc__err_set(err, CHC_WOULD_BLOCK, "ioless buffer drained");
     if (in->eof) return chc__err_set(err, CHC_ERR_EOF, "unexpected eof");
 
     if (in->io->check_cancel && in->io->check_cancel(in->io->ud))
@@ -786,7 +907,7 @@ chc__in_refill(chc__in *in, chc_err *err)
 }
 
 static int
-chc__read_byte(chc__in *in, uint8_t *out, chc_err *err)
+chc__read_byte(chc_in *in, uint8_t *out, chc_err *err)
 {
     if (in->pos >= in->fill) {
         int rc = chc__in_refill(in, err);
@@ -798,7 +919,7 @@ chc__read_byte(chc__in *in, uint8_t *out, chc_err *err)
 }
 
 static int
-chc__read_bytes(chc__in *in, void *dst, size_t n, chc_err *err)
+chc__read_bytes(chc_in *in, void *dst, size_t n, chc_err *err)
 {
     uint8_t *p = dst;
 
@@ -815,8 +936,10 @@ chc__read_bytes(chc__in *in, void *dst, size_t n, chc_err *err)
     /* Bypass staging buf when request spans more than one refill, read
      * straight into caller's dst to skip the staging memcpy. Only fires
      * after the staging buf is drained, so buffered-reader invariants
-     * (pos, fill, consumed) stay consistent. */
-    while (n > in->cap) {
+     * (pos, fill, consumed) stay consistent. Disabled in ioless: bypassed
+     * bytes land outside in->buf and can't be rewound, so ioless routes
+     * everything through the (growable) staging buf. */
+    while (in->io != NULL && n > in->cap) {
         if (in->eof)
             return chc__err_set(err, CHC_ERR_EOF, "short read");
         if (in->io->check_cancel && in->io->check_cancel(in->io->ud))
@@ -855,7 +978,7 @@ chc__read_bytes(chc__in *in, void *dst, size_t n, chc_err *err)
 }
 
 static int
-chc__read_varuint(chc__in *in, uint64_t *out, chc_err *err)
+chc__read_varuint(chc_in *in, uint64_t *out, chc_err *err)
 {
     uint64_t v = 0;
     for (int i = 0; i < 10; i++) {
@@ -869,7 +992,7 @@ chc__read_varuint(chc__in *in, uint64_t *out, chc_err *err)
 }
 
 static int
-chc__read_u32_le(chc__in *in, uint32_t *out, chc_err *err)
+chc__read_u32_le(chc_in *in, uint32_t *out, chc_err *err)
 {
     uint8_t b[4];
     int rc = chc__read_bytes(in, b, 4, err);
@@ -880,7 +1003,7 @@ chc__read_u32_le(chc__in *in, uint32_t *out, chc_err *err)
 }
 
 static int
-chc__read_u64_le(chc__in *in, uint64_t *out, chc_err *err)
+chc__read_u64_le(chc_in *in, uint64_t *out, chc_err *err)
 {
     uint8_t b[8];
     int rc = chc__read_bytes(in, b, 8, err);
@@ -893,7 +1016,7 @@ chc__read_u64_le(chc__in *in, uint64_t *out, chc_err *err)
 }
 
 static int
-chc__read_string(chc__in *in, char **out, size_t *out_len, chc_err *err)
+chc__read_string(chc_in *in, char **out, size_t *out_len, chc_err *err)
 {
     const chc_alloc *al = in->al;
     uint64_t len;
@@ -1944,11 +2067,11 @@ chc_type_elem_size(const chc_type *t)
 #define CHC__LC_HAS_ADDITIONAL_KEYS (1u << 9)
 #define CHC__LC_NEED_UPDATE_DICT    (1u << 10)
 
-static int chc__col_read(chc__in *in, const chc_type *t,
+static int chc__col_read(chc_in *in, const chc_type *t,
                          size_t n_rows, chc_column **out, chc_err *err);
 
 static int
-chc__col_read_fixed(chc__in *in, size_t elem_size, size_t n_rows,
+chc__col_read_fixed(chc_in *in, size_t elem_size, size_t n_rows,
                     chc_column **out, chc_err *err)
 {
     const chc_alloc *al = in->al;
@@ -1973,7 +2096,7 @@ chc__col_read_fixed(chc__in *in, size_t elem_size, size_t n_rows,
 }
 
 static int
-chc__col_read_string(chc__in *in, size_t n_rows,
+chc__col_read_string(chc_in *in, size_t n_rows,
                      chc_column **out, chc_err *err)
 {
     const chc_alloc *al = in->al;
@@ -2023,7 +2146,7 @@ chc__col_read_string(chc__in *in, size_t n_rows,
 /* Composite columns might have a prefix sub-stream. Only LowCardinality
  * actually emits one in the formats we handle: a uint64 key version. */
 static int
-chc__col_read_prefix(chc__in *in, const chc_type *t, chc_err *err)
+chc__col_read_prefix(chc_in *in, const chc_type *t, chc_err *err)
 {
     if (t->kind == CHC_LOW_CARDINALITY) {
         uint64_t v;
@@ -2049,7 +2172,7 @@ chc__col_read_prefix(chc__in *in, const chc_type *t, chc_err *err)
  * 0 = Point, 1 = Ring (Array(Point)), 2 = Polygon (Array(Ring)),
  * 3 = MultiPolygon (Array(Polygon)). Defined ahead of chc__col_read so it
  * can call back into here. */
-static int chc__col_read_geo(chc__in *in, int depth, size_t n_rows,
+static int chc__col_read_geo(chc_in *in, int depth, size_t n_rows,
                              chc_column **out, chc_err *err);
 
 /* Byte-swap a host-typed uint64/keys array in place on BE hosts. No-op on LE. */
@@ -2076,7 +2199,7 @@ chc__swap_keys(CHC_MAYBE_UNUSED void *p, CHC_MAYBE_UNUSED size_t n,
 }
 
 static int
-chc__col_read(chc__in *in, const chc_type *t,
+chc__col_read(chc_in *in, const chc_type *t,
               size_t n_rows, chc_column **out, chc_err *err)
 {
     const chc_alloc *al = in->al;
@@ -2349,7 +2472,7 @@ chc__col_read(chc__in *in, const chc_type *t,
 }
 
 static int
-chc__col_read_geo(chc__in *in, int depth, size_t n_rows,
+chc__col_read_geo(chc_in *in, int depth, size_t n_rows,
                   chc_column **out, chc_err *err)
 {
     const chc_alloc *al = in->al;
@@ -2441,12 +2564,12 @@ const chc_column *chc_block_column(const chc_block *b, size_t i)
 bool              chc_block_is_overflows(const chc_block *b) { return b ? b->is_overflows : false; }
 int32_t           chc_block_bucket_num(const chc_block *b)   { return b ? b->bucket_num : 0; }
 
-/* Block read using an already-initialised chc__in. Used by chc_block_read
+/* Block read using an already-initialised chc_in. Used by chc_block_read
  * (one-shot) and by clickhouse-client.h's recv_packet (persistent buffer).
  * Returns 0 with *out == NULL on clean EOF at block boundary (only when
  * opts->has_block_info is false; TCP path has no clean-EOF concept). */
 static int
-chc__block_read_in(chc__in *in, const chc_alloc *al,
+chc__block_read_in(chc_in *in, const chc_alloc *al,
                    const chc_block_opts *opts, chc_block **out, chc_err *err)
 {
     chc_block *b = chc__calloc(al, sizeof *b, err);
@@ -2567,11 +2690,11 @@ chc_block_read(chc_io *io, const chc_alloc *al,
 {
     chc_block_opts def = {0};
     if (!opts) opts = &def;
-    chc__in in;
-    int rc = chc__in_init(&in, io, al, opts->read_buffer_bytes, err);
+    chc_in in;
+    int rc = chc_in_init(&in, io, al, opts->read_buffer_bytes, err);
     if (rc != CHC_OK) return rc;
     rc = chc__block_read_in(&in, al, opts, out, err);
-    chc__in_free(&in);
+    chc_in_free(&in);
     return rc;
 }
 

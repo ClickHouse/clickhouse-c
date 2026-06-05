@@ -14,6 +14,7 @@
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define CHECK(cond) do {                                            \
@@ -63,5 +64,97 @@
         fail_count++; goto out;                                     \
     }                                                               \
 } while (0)
+
+typedef struct test_mem_src {
+    const uint8_t *data;
+    size_t len;
+    size_t pos;
+} test_mem_src;
+
+typedef struct test_mem_sink {
+    uint8_t *data;
+    size_t len;
+    size_t cap;
+} test_mem_sink;
+
+CHC_MAYBE_UNUSED static int
+test_mem_err_set(chc_err *err, int code, const char *msg)
+{
+    if (err) {
+        err->code = code;
+        err->server_code = 0;
+        snprintf(err->msg, sizeof err->msg, "%s", msg);
+        err->server_name[0] = '\0';
+    }
+    return code;
+}
+
+CHC_MAYBE_UNUSED static int
+test_mem_read(void *ud, void *buf, size_t len, size_t *out_n, chc_err *err)
+{
+    (void) err;
+    test_mem_src *m = ud;
+    size_t avail = m->len - m->pos;
+    size_t take = len < avail ? len : avail;
+    if (take) memcpy(buf, m->data + m->pos, take);
+    m->pos += take;
+    *out_n = take;
+    return CHC_OK;
+}
+
+CHC_MAYBE_UNUSED static void
+test_mem_src_init(test_mem_src *src, chc_io *io, const void *data, size_t len)
+{
+    src->data = (const uint8_t *) data;
+    src->len = len;
+    src->pos = 0;
+    io->ud = src;
+    io->read = test_mem_read;
+    io->write = NULL;
+    io->check_cancel = NULL;
+}
+
+CHC_MAYBE_UNUSED static int
+test_mem_sink_write(void *ud, const void *buf, size_t n, chc_err *err)
+{
+    test_mem_sink *s = ud;
+    if (n > SIZE_MAX - s->len)
+        return test_mem_err_set(err, CHC_ERR_OOM, "mem sink size overflow");
+
+    size_t need = s->len + n;
+    if (need > s->cap) {
+        size_t nc = s->cap ? s->cap : 256;
+        while (nc < need) {
+            if (nc > SIZE_MAX / 2) { nc = need; break; }
+            nc *= 2;
+        }
+        uint8_t *nb = realloc(s->data, nc);
+        if (!nb) return test_mem_err_set(err, CHC_ERR_OOM, "mem sink oom");
+        s->data = nb;
+        s->cap = nc;
+    }
+    if (n) memcpy(s->data + s->len, buf, n);
+    s->len += n;
+    return CHC_OK;
+}
+
+CHC_MAYBE_UNUSED static void
+test_mem_sink_init(test_mem_sink *sink, chc_io *io)
+{
+    memset(sink, 0, sizeof *sink);
+    io->ud = sink;
+    io->read = NULL;
+    io->write = test_mem_sink_write;
+    io->check_cancel = NULL;
+}
+
+CHC_MAYBE_UNUSED static void
+test_mem_sink_free(test_mem_sink *sink)
+{
+    free(sink->data);
+    sink->data = NULL;
+    sink->len = 0;
+    sink->cap = 0;
+}
 
 #endif
