@@ -64,8 +64,8 @@ read_one_block(const char *query)
     chc_posix_io_init(&state, &io, fd, NULL, NULL);
 
     chc_block *b = NULL;
-    chc_block_opts opts = {0};
-    chc_err err = {0};
+    chc_block_opts opts = {};
+    chc_err err = {};
     int rc = chc_block_read(&io, &al, &opts, &b, &err);
     if (rc < 0) {
         fprintf(stderr, "%s: decode failed (rc=%d): %s\n", current_test, rc, err.msg);
@@ -318,7 +318,7 @@ static void test_named_tuple_parser(void) {
     };
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
         chc_type *t = NULL;
-        chc_err   err = {0};
+        chc_err   err = {};
         int rc = chc_type_parse(cases[i].src, strlen(cases[i].src), &al, &t, &err);
         if (rc != CHC_OK) {
             fprintf(stderr, "%s: parse '%s' failed: %s\n",
@@ -491,7 +491,7 @@ static void test_uuid(void) {
      * hi = first 8 bytes of the string form & lo = last 8 bytes, bytes are
      * reverse(hi) followed by reverse(lo). */
     static const uint8_t expected[4][16] = {
-        {0},
+        {},
         {0x77,0x66,0x55,0x44,0x33,0x22,0x11,0x00,
          0xff,0xee,0xdd,0xcc,0xbb,0xaa,0x99,0x88},
         {0x08,0x07,0x06,0x05,0x04,0x03,0x02,0x01,
@@ -650,8 +650,8 @@ static void test_json_wrong_version(void) {
     chc_posix_io_init(&state, &io, fd, NULL, NULL);
 
     chc_block *b = NULL;
-    chc_block_opts opts = {0};
-    chc_err err = {0};
+    chc_block_opts opts = {};
+    chc_err err = {};
     int rc = chc_block_read(&io, &al, &opts, &b, &err);
     close(fd);
     int status;
@@ -681,7 +681,7 @@ static void test_column_validate(void) {
     const chc_column *arr = chc_block_column(b, 0);
     const chc_column *lc  = chc_block_column(b, 1);
 
-    chc_err err = {0};
+    chc_err err = {};
     CHECK_EQ_U64(chc_column_validate(arr, &err), CHC_OK);
     CHECK_EQ_U64(chc_column_validate(lc, &err), CHC_OK);
     CHECK_EQ_U64(chc_column_validate(NULL, &err), CHC_OK);
@@ -690,7 +690,7 @@ static void test_column_validate(void) {
     uint64_t *offs = (uint64_t *) chc_column_array_offsets(arr);
     uint64_t saved = offs[1];
     offs[1] = 1;  /* offs[0]=3, offs[1]=1 < 3 */
-    err = (chc_err) {0};
+    err = (chc_err) {};
     CHECK_EQ_U64(chc_column_validate(arr, &err), CHC_ERR_PROTOCOL);
     CHECK(strstr(err.msg, "monotonic") != NULL);
     offs[1] = saved;
@@ -700,7 +700,7 @@ static void test_column_validate(void) {
     uint8_t *keys = (uint8_t *) chc_column_lc_keys(lc);
     uint8_t saved_k = keys[0];
     keys[0] = 99;
-    err = (chc_err) {0};
+    err = (chc_err) {};
     CHECK_EQ_U64(chc_column_validate(lc, &err), CHC_ERR_PROTOCOL);
     CHECK(strstr(err.msg, "out of range") != NULL);
     keys[0] = saved_k;
@@ -728,11 +728,14 @@ static void test_type_parse_roundtrip(void) {
         "IPv4",
         "IPv6",
         "Object('json')",
+        "QBit(Float32, 16)",
+        "QBit(BFloat16, 8)",
+        "QBit(Float64, 1536)",
     };
     chc_alloc al = chc_alloc_stdlib();
     for (size_t i = 0; i < sizeof types / sizeof types[0]; i++) {
         chc_type *t = NULL;
-        chc_err err = {0};
+        chc_err err = {};
         int rc = chc_type_parse(types[i], strlen(types[i]), &al, &t, &err);
         if (rc != CHC_OK) {
             fprintf(stderr, "parse %s failed: %s\n", types[i], err.msg);
@@ -776,14 +779,155 @@ static void test_invalid_array_overflow(void) {
     chc_io io;
     test_mem_src_init(&m, &io, bytes, sizeof bytes);
     chc_alloc al = chc_alloc_stdlib();
-    chc_block_opts opts = {0};
+    chc_block_opts opts = {};
     chc_block *b = NULL;
-    chc_err err = {0};
+    chc_err err = {};
     int rc = chc_block_read(&io, &al, &opts, &b, &err);
     CHECK(rc == CHC_ERR_PROTOCOL);
     CHECK(b == NULL);
     CHECK(strstr(err.msg, "too large") != NULL);
     if (b) free_block(b);
+}
+
+/* Parser-only: QBit metadata extraction & rejection of illegal parameters. */
+static void test_qbit_parse(void) {
+    current_test = "qbit_parse";
+    chc_alloc al = chc_alloc_stdlib();
+
+    struct { const char *src; chc_kind elem; size_t dim, bits; } ok[] = {
+        { "QBit(Float32, 100)",  CHC_FLOAT32,   100, 32 },
+        { "QBit(BFloat16, 8)",   CHC_BFLOAT16,    8, 16 },
+        { "QBit(Float64, 1536)", CHC_FLOAT64,  1536, 64 },
+    };
+    for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++) {
+        chc_type *t = NULL; chc_err err = {};
+        int rc = chc_type_parse(ok[i].src, strlen(ok[i].src), &al, &t, &err);
+        if (rc != CHC_OK) {
+            fprintf(stderr, "%s: parse '%s' failed: %s\n",
+                    current_test, ok[i].src, err.msg);
+            fail_count++; continue;
+        }
+        CHECK_EQ_I64(chc_type_kind(t), CHC_QBIT);
+        CHECK_EQ_U64(chc_type_qbit_dimension(t), ok[i].dim);
+        CHECK_EQ_U64(chc_type_qbit_element_size(t), ok[i].bits);
+        CHECK_EQ_U64(chc_type_n_children(t), 1);
+        CHECK_EQ_I64(chc_type_kind(chc_type_child(t, 0)), ok[i].elem);
+        chc_type_destroy(t, &al);
+    }
+
+    /* Non-float element, missing/zero/negative dimension all rejected. */
+    const char *bad[] = {
+        "QBit(Int32, 4)",
+        "QBit(String, 4)",
+        "QBit(Float32, 0)",
+        "QBit(Float32)",
+        "QBit(Float32, -1)",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        chc_type *t = NULL; chc_err err = {};
+        int rc = chc_type_parse(bad[i], strlen(bad[i]), &al, &t, &err);
+        if (rc == CHC_OK) {
+            fprintf(stderr, "%s: '%s' parsed but should have failed\n",
+                    current_test, bad[i]);
+            fail_count++;
+            chc_type_destroy(t, &al);
+        }
+    }
+}
+
+/* Crafted-bytes decode. The Native wire form of QBit(T, N) is
+ * Tuple(FixedString(ceil(N/8)) x bits) with the MSB bit-plane first;
+ * the decoder must hand back exactly those planes. */
+static void test_qbit_decode(void) {
+    current_test = "qbit_decode";
+
+    /* QBit(Float32, 1) holding [1.0]. 1.0f = 0x3F800000; plane p carries word
+     * bit (31 - p), so the seven set bits (23..29) land in planes 2..8. */
+    {
+        uint8_t buf[64];
+        size_t n = 0;
+        const char *tn = "QBit(Float32, 1)";
+        size_t tnl = strlen(tn);
+        buf[n++] = 0x01;                       /* n_columns = 1 */
+        buf[n++] = 0x01;                       /* n_rows    = 1 */
+        buf[n++] = 0x01; buf[n++] = 'q';       /* name "q"      */
+        buf[n++] = (uint8_t) tnl;
+        memcpy(buf + n, tn, tnl); n += tnl;
+        for (int p = 0; p < 32; p++)
+            buf[n++] = (p >= 2 && p <= 8) ? 0x01 : 0x00;
+
+        test_mem_src m;
+        chc_io io;
+        test_mem_src_init(&m, &io, buf, n);
+        chc_alloc al = chc_alloc_stdlib();
+        chc_block_opts opts = {};
+        chc_block *b = NULL;
+        chc_err err = {};
+        int rc = chc_block_read(&io, &al, &opts, &b, &err);
+        CHECK(rc == CHC_OK);
+        CHECK(b != NULL);
+        if (b) {
+            const chc_type *t = chc_block_column_type(b, 0);
+            CHECK_EQ_I64(chc_type_kind(t), CHC_QBIT);
+            CHECK_EQ_U64(chc_type_qbit_dimension(t), 1);
+            CHECK_EQ_U64(chc_type_qbit_element_size(t), 32);
+
+            const chc_column *c = chc_block_column(b, 0);
+            CHECK(chc_column_layout(c) == CHC_COL_TUPLE);
+            CHECK_EQ_U64(chc_column_tuple_arity(c), 32);
+            CHECK_EQ_U64(chc_column_n_rows(c), 1);
+            for (int p = 0; p < 32; p++) {
+                const chc_column *plane = chc_column_tuple_child(c, p);
+                CHECK(chc_column_layout(plane) == CHC_COL_FIXED);
+                size_t es;
+                const uint8_t *d = chc_column_fixed_data(plane, &es);
+                CHECK_EQ_U64(es, 1);
+                CHECK_EQ_I64(d[0], (p >= 2 && p <= 8) ? 0x01 : 0x00);
+            }
+            CHECK_EQ_U64(chc_column_validate(c, &err), CHC_OK);
+            free_block(b);
+        }
+    }
+
+    /* QBit(BFloat16, 16): 16 planes of FixedString(2). Confirms element_size
+     * 16 -> 16 planes & ceil(16/8)=2 byte plane width, decoded in order. */
+    {
+        uint8_t buf[64];
+        size_t n = 0;
+        const char *tn = "QBit(BFloat16, 16)";
+        size_t tnl = strlen(tn);
+        buf[n++] = 0x01;                       /* n_columns = 1 */
+        buf[n++] = 0x01;                       /* n_rows    = 1 */
+        buf[n++] = 0x01; buf[n++] = 'q';       /* name "q"      */
+        buf[n++] = (uint8_t) tnl;
+        memcpy(buf + n, tn, tnl); n += tnl;
+        size_t body0 = n;
+        for (int k = 0; k < 32; k++) buf[n++] = (uint8_t) k;   /* 16 planes x 2 */
+
+        test_mem_src m;
+        chc_io io;
+        test_mem_src_init(&m, &io, buf, n);
+        chc_alloc al = chc_alloc_stdlib();
+        chc_block_opts opts = {};
+        chc_block *b = NULL;
+        chc_err err = {};
+        int rc = chc_block_read(&io, &al, &opts, &b, &err);
+        CHECK(rc == CHC_OK);
+        CHECK(b != NULL);
+        if (b) {
+            CHECK_EQ_U64(chc_type_qbit_element_size(chc_block_column_type(b, 0)), 16);
+            const chc_column *c = chc_block_column(b, 0);
+            CHECK_EQ_U64(chc_column_tuple_arity(c), 16);
+            for (int p = 0; p < 16; p++) {
+                size_t es;
+                const uint8_t *d = chc_column_fixed_data(chc_column_tuple_child(c, p), &es);
+                CHECK_EQ_U64(es, 2);
+                CHECK_EQ_I64(d[0], buf[body0 + 2 * p]);
+                CHECK_EQ_I64(d[1], buf[body0 + 2 * p + 1]);
+            }
+            free_block(b);
+        }
+    }
 }
 
 int main(void) {
@@ -809,6 +953,8 @@ int main(void) {
     test_json_wrong_version();
     test_column_validate();
     test_invalid_array_overflow();
+    test_qbit_parse();
+    test_qbit_decode();
 
     if (fail_count) {
         fprintf(stderr, "FAIL: %d check(s) failed\n", fail_count);

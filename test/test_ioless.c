@@ -47,7 +47,7 @@ decode_ioless(const uint8_t *bytes, size_t len, size_t chunk, const chc_alloc *a
         chc_block *b = NULL;
         for (;;) {
             chc__in_checkpoint(&in);
-            chc_err e = {0};
+            chc_err e = {};
             int rc = chc__block_read_in(&in, al, opts, &b, &e);
             if (rc == CHC_OK && b) break;
             if (rc == CHC_WOULD_BLOCK) {
@@ -83,7 +83,7 @@ test_ioless_basic(void)
 {
     current_test = "ioless_basic";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
     chc_in in;
     CHECK_OK(chc_in_init_ioless(&in, &al), err);
 
@@ -113,7 +113,7 @@ test_ioless_checkpoint_rewind(void)
 {
     current_test = "ioless_checkpoint_rewind";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
     chc_in in;
     CHECK_OK(chc_in_init_ioless(&in, &al), err);
 
@@ -153,7 +153,7 @@ test_ioless_mark_growth(void)
 {
     current_test = "ioless_mark_growth";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
     chc_in in;
     CHECK_OK(chc_in_init_ioless(&in, &al), err);
 
@@ -188,7 +188,7 @@ test_ioless_reset_compacts(void)
 {
     current_test = "ioless_reset_compacts";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
     chc_in in;
     CHECK_OK(chc_in_init_ioless(&in, &al), err);
 
@@ -216,14 +216,14 @@ test_golden_chunk(void)
 {
     current_test = "golden_chunk";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
     chc_block_opts opts = { .has_block_info = true, .has_custom_serialization = true };
 
     size_t len = 0;
     uint8_t *stream = test_build_golden_stream(&al, &opts, 3000, &len);
     CHECK(stream != NULL); if (!stream) return;
 
-    chc_block *oracle[TEST_GOLDEN_BLOCKS] = {0};
+    chc_block *oracle[TEST_GOLDEN_BLOCKS] = {};
     uint64_t oracle_consumed = 0;
     int rc = test_decode_blocks_io(stream, len, &al, &opts, oracle,
                                    TEST_GOLDEN_BLOCKS, &oracle_consumed, &err);
@@ -238,9 +238,9 @@ test_golden_chunk(void)
 
     static const size_t chunks[] = { 1, 2, 3, 7, 64, 1u << 20 };
     for (size_t ci = 0; ci < sizeof chunks / sizeof *chunks; ci++) {
-        chc_block *subj[TEST_GOLDEN_BLOCKS] = {0};
+        chc_block *subj[TEST_GOLDEN_BLOCKS] = {};
         uint64_t subj_consumed = 0;
-        chc_err e = {0};
+        chc_err e = {};
         int sr = decode_ioless(stream, len, chunks[ci], &al, &opts, subj,
                              &subj_consumed, &e);
         if (sr != 0) {
@@ -288,7 +288,7 @@ build_compressed_block(const chc_alloc *al, const chc_block_opts *opts,
     test_mem_sink raw;
     chc_io rio;
     test_mem_sink_init(&raw, &rio);
-    chc_err err = {0};
+    chc_err err = {};
     if (test_write_uint_string_block(&rio, al, opts, 30000, &err)) {
         fprintf(stderr, "build_compressed_block: raw: %s\n", err.msg);
         test_mem_sink_free(&raw); return NULL;
@@ -348,7 +348,7 @@ decode_ioless_comp(const uint8_t *bytes, size_t len, size_t chunk,
         chc_io dio;
         chc__decomp_src_init(&src, &raw, codec, al, &dio);
         chc_in dec;
-        chc_err e = {0};
+        chc_err e = {};
         if (chc_in_init(&dec, &dio, al, 0, &e)) {
             chc__decomp_src_free(&src); *err = e; chc_in_free(&raw); return -1;
         }
@@ -382,7 +382,7 @@ test_golden_chunk_compressed(void)
 {
     current_test = "golden_chunk_compressed";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
     chc_block_opts opts = { .has_block_info = true, .has_custom_serialization = true };
     chc_codec codec;
     chc_lz4_codec_init(&codec);
@@ -406,7 +406,7 @@ test_golden_chunk_compressed(void)
     for (size_t ci = 0; ci < sizeof chunks / sizeof *chunks; ci++) {
         chc_block *subj = NULL;
         uint64_t subj_consumed = 0;
-        chc_err e = {0};
+        chc_err e = {};
         int sr = decode_ioless_comp(comp, comp_len, chunks[ci], &codec, &al, &opts,
                                   &subj, &subj_consumed, &e);
         if (sr != 0) {

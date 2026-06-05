@@ -79,7 +79,7 @@ test_write_uint32(void)
 {
     current_test = "write_uint32";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
 
     chc_block_builder *bb = NULL;
     if (chc_block_builder_init(&bb, &al, &err) < 0) {
@@ -132,7 +132,7 @@ test_write_string(void)
 {
     current_test = "write_string";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
 
     chc_block_builder *bb = NULL;
     if (chc_block_builder_init(&bb, &al, &err) < 0) {
@@ -183,7 +183,7 @@ static char *
 capture_roundtrip(const char *test_name, chc_block_builder *bb,
                   const char *structure, const char *sql, size_t *out_len)
 {
-    chc_err err = {0};
+    chc_err err = {};
     int wfd, rfd;
     pid_t pid = spawn_local_input(sql, structure, &wfd, &rfd);
     CHECK(pid > 0);
@@ -232,7 +232,7 @@ test_write_nullable_fixed(void)
 {
     current_test = "write_nullable_fixed";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
 
     chc_block_builder *bb = NULL;
     if (chc_block_builder_init(&bb, &al, &err) < 0) {
@@ -265,7 +265,7 @@ test_write_nullable_string(void)
 {
     current_test = "write_nullable_string";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
 
     chc_block_builder *bb = NULL;
     if (chc_block_builder_init(&bb, &al, &err) < 0) {
@@ -299,7 +299,7 @@ test_write_array_fixed(void)
 {
     current_test = "write_array_fixed";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
 
     chc_block_builder *bb = NULL;
     if (chc_block_builder_init(&bb, &al, &err) < 0) {
@@ -332,7 +332,7 @@ test_write_array_string(void)
 {
     current_test = "write_array_string";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
 
     chc_block_builder *bb = NULL;
     if (chc_block_builder_init(&bb, &al, &err) < 0) {
@@ -366,7 +366,7 @@ test_write_array_nested_fixed(void)
 {
     current_test = "write_array_nested_fixed";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
 
     chc_block_builder *bb = NULL;
     if (chc_block_builder_init(&bb, &al, &err) < 0) {
@@ -407,7 +407,7 @@ test_write_array_nested_fixed_3d(void)
 {
     current_test = "write_array_nested_fixed_3d";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
 
     chc_block_builder *bb = NULL;
     if (chc_block_builder_init(&bb, &al, &err) < 0) {
@@ -448,7 +448,7 @@ test_write_array_nested_string(void)
 {
     current_test = "write_array_nested_string";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
 
     chc_block_builder *bb = NULL;
     if (chc_block_builder_init(&bb, &al, &err) < 0) {
@@ -475,9 +475,9 @@ test_write_array_nested_string(void)
     /* Bad-ndim path: ndim=2 against a 1-level Array(String) type must
      * reject with CHC_ERR_TYPE. */
     chc_type *bad = NULL;
-    chc_err  berr = {0};
+    chc_err  berr = {};
     if (chc_type_parse("Array(String)", 13, &al, &bad, &berr) == CHC_OK) {
-        chc_err xerr = {0};
+        chc_err xerr = {};
         int rc = chc_block_builder_append_array_nested_string(bb, "x", 1, bad,
                 2, levels, levels_len, val_offs, buf, 2, &xerr);
         CHECK(rc == CHC_ERR_TYPE);
@@ -499,7 +499,7 @@ test_write_lc_string(void)
 {
     current_test = "write_lc_string";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
 
     chc_block_builder *bb = NULL;
     if (chc_block_builder_init(&bb, &al, &err) < 0) {
@@ -534,7 +534,7 @@ test_write_lc_nullable_string(void)
 {
     current_test = "write_lc_nullable_string";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
 
     chc_block_builder *bb = NULL;
     if (chc_block_builder_init(&bb, &al, &err) < 0) {
@@ -576,7 +576,7 @@ test_write_json_string(void)
 {
     current_test = "write_json_string";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
 
     chc_block_builder *bb = NULL;
     if (chc_block_builder_init(&bb, &al, &err) < 0) {
@@ -597,9 +597,9 @@ test_write_json_string(void)
     /* Mismatched-kind validation: same args against a String type must
      * error with CHC_ERR_TYPE, mirroring the other builder helpers. */
     chc_type *bad = NULL;
-    chc_err  berr = {0};
+    chc_err  berr = {};
     if (chc_type_parse("String", 6, &al, &bad, &berr) == CHC_OK) {
-        chc_err xerr = {0};
+        chc_err xerr = {};
         int rc = chc_block_builder_append_json_string(bb, "x", 1, bad,
                 offs, buf, 2, &xerr);
         CHECK(rc == CHC_ERR_TYPE);

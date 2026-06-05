@@ -75,7 +75,7 @@ read_block_with_cancel(int fd, chc_block **out_block, chc_err *err) {
     chc_posix_io state;
     chc_io io;
     chc_posix_io_init(&state, &io, fd, cancel_cb, NULL);
-    chc_block_opts opts = {0};
+    chc_block_opts opts = {};
     return chc_block_read(&io, &al, &opts, out_block, err);
 }
 
@@ -95,7 +95,7 @@ test_precancel(void) {
 
     cancel_now = true;
     cancel_calls = 0;
-    chc_err err = {0};
+    chc_err err = {};
     chc_block *b = NULL;
     int rc = read_block_with_cancel(p[0], &b, &err);
 
@@ -132,7 +132,7 @@ test_cancel_observed_each_refill(void) {
 
     /* First: with cancel false & write-end closed → clean EOF return. */
     close(p[1]);
-    chc_err err = {0};
+    chc_err err = {};
     chc_block *b = NULL;
     int rc = read_block_with_cancel(p[0], &b, &err);
     /* Clean EOF at block boundary surfaces as rc == 0, out == NULL. */
@@ -181,7 +181,7 @@ test_blocked_read_eintr(void) {
     int p[2];
     CHECK(pipe(p) == 0);
 
-    struct sigaction sa = {0};
+    struct sigaction sa = {};
     sa.sa_handler = on_sigalrm;
     /* No SA_RESTART: signal delivery surfaces EINTR to the read syscall,
      * giving chc__posix_read the chance to re-check cancel before
@@ -202,7 +202,7 @@ test_blocked_read_eintr(void) {
         struct timespec ts = { .tv_sec = 0, .tv_nsec = 200 * 1000 * 1000 };
         nanosleep(&ts, NULL);
         uint8_t b = 1;
-        (void) write(p[1], &b, 1);
+        (void)write(p[1], &b, 1);
         close(p[1]);
         _exit(0);
     }
@@ -210,13 +210,13 @@ test_blocked_read_eintr(void) {
 
     cancel_now = false;
     alarm_fired = 0;
-    struct itimerval it = {0};
+    struct itimerval it = {};
     it.it_value.tv_usec = 50 * 1000;            /* 50ms */
     CHECK(setitimer(ITIMER_REAL, &it, NULL) == 0);
 
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    chc_err err = {0};
+    chc_err err = {};
     chc_block *b = NULL;
     int rc = read_block_with_cancel(p[0], &b, &err);
     clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -266,9 +266,9 @@ test_read_deadline(void) {
 
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    chc_block_opts opts = {0};
+    chc_block_opts opts = {};
     chc_block *b = NULL;
-    chc_err err = {0};
+    chc_err err = {};
     int rc = chc_block_read(&io, &al, &opts, &b, &err);
     clock_gettime(CLOCK_MONOTONIC, &t1);
     long elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000

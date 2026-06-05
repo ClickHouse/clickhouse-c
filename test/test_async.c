@@ -183,7 +183,7 @@ build_response_stream(const chc_alloc *al, const chc_block_opts *opts,
     test_mem_sink s;
     chc_io io;
     test_mem_sink_init(&s, &io);
-    chc_err err = {0};
+    chc_err err = {};
     if (write_data_packet_uint_string(&io, al, opts, 3000, &err) ||
         write_data_packet_composite(&io, al, opts, &err) ||
         write_data_packet_lc(&io, al, opts, &err) ||
@@ -235,7 +235,7 @@ oracle_decode(const uint8_t *bytes, size_t len, const chc_alloc *al,
 
     size_t n = 0;
     for (;;) {
-        chc_packet pkt = {0};
+        chc_packet pkt = {};
         int rc = chc_client_recv_packet(&c, &pkt, err);
         if (rc != CHC_OK) { chc_packet_clear(&c, &pkt); chc_in_free(&c.in); return -1; }
         out[n].kind = pkt.kind;
@@ -279,8 +279,8 @@ subject_decode(const uint8_t *bytes, size_t len, size_t chunk,
     size_t fed = 0;
     size_t n = 0;
     for (;;) {
-        chc_packet pkt = {0};
-        chc_err e = {0};
+        chc_packet pkt = {};
+        chc_err e = {};
         int rc = chc_async_recv_packet(c, &pkt, &e);
         if (rc == CHC_WOULD_BLOCK) {
             if (fed >= len) {
@@ -335,14 +335,14 @@ test_recv_golden_chunk(void)
 {
     current_test = "recv_golden_chunk";
     chc_alloc al = test_make_alloc();
-    chc_err err = {0};
+    chc_err err = {};
     chc_block_opts opts = { .has_block_info = true, .has_custom_serialization = true };
 
     size_t len = 0;
     uint8_t *stream = build_response_stream(&al, &opts, &len);
     CHECK(stream != NULL); if (!stream) return;
 
-    rec_packet oracle[SEQ_LEN + 1] = {0};
+    rec_packet oracle[SEQ_LEN + 1] = {};
     size_t on = 0;
     if (oracle_decode(stream, len, &al, oracle, &on, &err) != 0) {
         fprintf(stderr, "%s: oracle decode failed: %s\n", current_test, err.msg);
@@ -353,9 +353,9 @@ test_recv_golden_chunk(void)
 
     static const size_t chunks[] = { 1, 2, 3, 7, 64, 1u << 20 };
     for (size_t ci = 0; ci < sizeof chunks / sizeof *chunks; ci++) {
-        rec_packet subj[SEQ_LEN + 1] = {0};
+        rec_packet subj[SEQ_LEN + 1] = {};
         size_t sn = 0;
-        chc_err e = {0};
+        chc_err e = {};
         if (subject_decode(stream, len, chunks[ci], &al, subj, &sn, &e) != 0) {
             fprintf(stderr, "%s: chunk=%zu decode failed: %s\n",
                     current_test, chunks[ci], e.msg);
@@ -416,7 +416,7 @@ build_hello_pong(const chc_alloc *al, size_t *out_len)
     test_mem_sink s;
     chc_io io;
     test_mem_sink_init(&s, &io);
-    chc_err err = {0};
+    chc_err err = {};
     uint64_t rev = TEST_REVISION;
     if (chc__write_varuint(&io, CHC_PKT_HELLO, &err) ||
         chc__write_string(&io, "ClickHouse-test", 15, &err) ||
@@ -448,7 +448,7 @@ test_handshake_chunked(void)
     static const size_t chunks[] = { 1, 2, 3, 7, 64, 1u << 20 };
     for (size_t ci = 0; ci < sizeof chunks / sizeof *chunks; ci++) {
         chc_async_client *c = NULL;
-        chc_err e = {0};
+        chc_err e = {};
         if (chc_async_client_init(&c, NULL, &al, &e)) {
             fprintf(stderr, "%s: init failed: %s\n", current_test, e.msg);
             fail_count++; continue;
@@ -501,7 +501,7 @@ test_out_shuttle(void)
 {
     current_test = "out_shuttle";
     chc_alloc al = test_make_alloc();
-    chc_err err = {0};
+    chc_err err = {};
     chc_async_client *c = NULL;
     CHECK_OK(chc_async_client_init(&c, NULL, &al, &err), err);
     c->cli.server.revision = TEST_REVISION;

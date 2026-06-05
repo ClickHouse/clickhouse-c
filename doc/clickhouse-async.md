@@ -111,7 +111,7 @@ for (;;) {
 chc_async_send_query(c, sql, sql_len, "", 0, &err);
 
 for (;;) {
-    chc_packet pkt = {0};
+    chc_packet pkt = {};
     int rc = chc_async_recv_packet(c, &pkt, &err);
     if (rc == CHC_WOULD_BLOCK) { pump(c); continue; }
     if (rc != CHC_OK) goto fail;

@@ -83,7 +83,7 @@ open_conn_compressed(test_conn *t, chc_compression comp, chc_err *err)
         return CHC_ERR_IO;
     }
     chc_posix_io_init(&t->io_state, &t->io, t->fd, NULL, NULL);
-    chc_client_opts opts = {0};
+    chc_client_opts opts = {};
     if (comp == CHC_COMP_LZ4) {
         chc_lz4_codec_init(&t->codec);
         opts.compression = CHC_COMP_LZ4;
@@ -131,7 +131,7 @@ recv_until_eos(test_conn *t, int max_packets, test_block_cb cb, void *ud,
                chc_err *err)
 {
     for (int i = 0; i < max_packets; i++) {
-        chc_packet pkt = {0};
+        chc_packet pkt = {};
         int rc = chc_client_recv_packet(t->c, &pkt, err);
         if (rc != CHC_OK) {
             chc_packet_clear(t->c, &pkt);
@@ -159,7 +159,7 @@ static int
 recv_insert_header(test_conn *t, int max_packets, chc_err *err)
 {
     for (int i = 0; i < max_packets; i++) {
-        chc_packet pkt = {0};
+        chc_packet pkt = {};
         int rc = chc_client_recv_packet(t->c, &pkt, err);
         if (rc != CHC_OK) {
             chc_packet_clear(t->c, &pkt);
@@ -328,11 +328,56 @@ count_sum_cb(const chc_block *b, void *ud)
     if (cv) a->sum = cv[0];
 }
 
+typedef struct {
+    bool saw;
+} qbit_acc;
+
+#define QBIT_DIM 16   /* >8 so planes span ceil(16/8)=2 bytes; multiple of 8 so
+                       * an all-equal vector fills each set plane's bytes fully */
+
+/*
+ * QBit(Float32, 16) on the wire is a Tuple of 32 FixedString(2) bit-planes,
+ * MSB plane first; plane p carries word bit (31 - p). All sixteen dimensions
+ * are 1.0f (0x3F800000), whose set bits 23..29 land in planes 2..8; identical
+ * rows fill every bit position, so each selected plane's two bytes are both
+ * 0xFF and every other plane (sign, exponent MSBs, mantissa) stays 0x00.
+ * Unlike test_block_decode.c's crafted bytes, this pins the client's QBit
+ * decode against output a real server actually emits.
+ */
+static void
+qbit_cb(const chc_block *b, void *ud)
+{
+    qbit_acc *a = ud;
+    a->saw = true;
+    CHECK(chc_block_n_columns(b) == 1);
+    if (chc_block_n_columns(b) < 1) return;
+
+    const chc_type *t = chc_block_column_type(b, 0);
+    CHECK(chc_type_kind(t) == CHC_QBIT);
+    CHECK_EQ_U64(chc_type_qbit_dimension(t), QBIT_DIM);
+    CHECK_EQ_U64(chc_type_qbit_element_size(t), 32);
+
+    const chc_column *q = chc_block_column(b, 0);
+    CHECK(chc_column_layout(q) == CHC_COL_TUPLE);
+    CHECK_EQ_U64(chc_column_tuple_arity(q), 32);
+    CHECK_EQ_U64(chc_column_n_rows(q), 1);
+    for (size_t p = 0; p < 32; p++) {
+        const chc_column *plane = chc_column_tuple_child(q, p);
+        CHECK(chc_column_layout(plane) == CHC_COL_FIXED);
+        size_t es = 0;
+        const uint8_t *d = chc_column_fixed_data(plane, &es);
+        CHECK_EQ_U64(es, (QBIT_DIM + 7) / 8);
+        if (!d || es < 1) continue;
+        uint8_t want = (p >= 2 && p <= 8) ? 0xFF : 0x00;
+        for (size_t k = 0; k < es; k++) CHECK_EQ_I64(d[k], want);
+    }
+}
+
 static void
 test_handshake(void)
 {
     current_test = "handshake";
-    test_conn t; chc_err err = {0};
+    test_conn t; chc_err err = {};
     int rc = open_conn(&t, &err); CHECK_OK(rc, err);
     const chc_server_info *si = chc_client_server_info(t.c);
     CHECK(si != NULL);
@@ -351,7 +396,7 @@ static void
 test_bad_database(void)
 {
     current_test = "bad_database";
-    test_conn t; chc_err err = {0};
+    test_conn t; chc_err err = {};
     memset(&t, 0, sizeof t);
     t.fd = -1;
     t.al = chc_alloc_stdlib();
@@ -372,10 +417,10 @@ static void
 test_ping(void)
 {
     current_test = "ping";
-    test_conn t; chc_err err = {0};
+    test_conn t; chc_err err = {};
     int rc = open_conn(&t, &err); CHECK_OK(rc, err);
     rc = chc_client_send_ping(t.c, &err); CHECK_OK(rc, err);
-    chc_packet pkt = {0};
+    chc_packet pkt = {};
     rc = chc_client_recv_packet(t.c, &pkt, &err); CHECK_OK(rc, err);
     CHECK(pkt.kind == CHC_PKT_PONG);
     chc_packet_clear(t.c, &pkt);
@@ -387,14 +432,14 @@ static void
 test_select_simple(void)
 {
     current_test = "select_simple";
-    test_conn t; chc_err err = {0};
+    test_conn t; chc_err err = {};
     int rc = open_conn(&t, &err); CHECK_OK(rc, err);
 
     const char *sql = "SELECT 42 AS x";
     rc = send_query(&t, sql, &err);
     CHECK_OK(rc, err);
 
-    select_simple_acc acc = {0};
+    select_simple_acc acc = {};
     rc = recv_until_eos(&t, 32, select_simple_cb, &acc, &err);
     CHECK_OK(rc, err);
     CHECK(acc.saw_data);
@@ -406,7 +451,7 @@ static void
 test_select_many(void)
 {
     current_test = "select_many";
-    test_conn t; chc_err err = {0};
+    test_conn t; chc_err err = {};
     int rc = open_conn(&t, &err); CHECK_OK(rc, err);
 
     const char *sql = "SELECT number, toString(number) FROM system.numbers LIMIT 100";
@@ -437,7 +482,7 @@ static void
 test_exception(void)
 {
     current_test = "exception";
-    test_conn t; chc_err err = {0};
+    test_conn t; chc_err err = {};
     int rc = open_conn(&t, &err); CHECK_OK(rc, err);
 
     const char *sql = "SELECT * FROM nonexistent_table_xyz";
@@ -446,7 +491,7 @@ test_exception(void)
 
     bool saw_exc = false;
     for (int i = 0; i < 32; i++) {
-        chc_packet pkt = {0};
+        chc_packet pkt = {};
         rc = chc_client_recv_packet(t.c, &pkt, &err); CHECK_OK(rc, err);
         bool eos = pkt.kind == CHC_PKT_END_OF_STREAM;
         if (pkt.kind == CHC_PKT_EXCEPTION) {
@@ -471,7 +516,7 @@ static void
 test_insert_roundtrip(void)
 {
     current_test = "insert_roundtrip";
-    test_conn t; chc_err err = {0};
+    test_conn t; chc_err err = {};
     chc_block_builder *bb = NULL;
     chc_type *u32 = NULL;
     int rc = open_conn(&t, &err); CHECK_OK(rc, err);
@@ -518,7 +563,7 @@ test_insert_roundtrip(void)
     rc = send_query(&t, "SELECT x, s FROM test_t ORDER BY x", &err);
     CHECK_OK(rc, err);
 
-    insert_readback_acc acc = {0};
+    insert_readback_acc acc = {};
     rc = recv_until_eos(&t, 64, insert_readback_cb, &acc, &err);
     CHECK_OK(rc, err);
     CHECK(acc.n_rows == 3);
@@ -538,7 +583,7 @@ static void
 test_select_with_setting(void)
 {
     current_test = "select_with_setting";
-    test_conn t; chc_err err = {0};
+    test_conn t; chc_err err = {};
     int rc = open_conn(&t, &err); CHECK_OK(rc, err);
 
     chc_query_setting settings[1] = {
@@ -550,7 +595,7 @@ test_select_with_setting(void)
     rc = chc_client_send_query_ex(t.c, sql, strlen(sql), &opts, &err);
     CHECK_OK(rc, err);
 
-    setting_acc acc = {0};
+    setting_acc acc = {};
     rc = recv_until_eos(&t, 32, setting_cb, &acc, &err);
     CHECK_OK(rc, err);
     CHECK(acc.saw_value);
@@ -562,7 +607,7 @@ static void
 test_select_with_param(void)
 {
     current_test = "select_with_param";
-    test_conn t; chc_err err = {0};
+    test_conn t; chc_err err = {};
     int rc = open_conn(&t, &err); CHECK_OK(rc, err);
 
     /* Param values pass through Field::restoreFromDump on the server, so
@@ -576,7 +621,7 @@ test_select_with_param(void)
     rc = chc_client_send_query_ex(t.c, sql, strlen(sql), &opts, &err);
     CHECK_OK(rc, err);
 
-    setting_acc acc = {0};
+    setting_acc acc = {};
     rc = recv_until_eos(&t, 32, string_param_cb, &acc, &err);
     CHECK_OK(rc, err);
     CHECK(acc.saw_value);
@@ -599,7 +644,7 @@ static void
 test_select_with_array_param(void)
 {
     current_test = "select_with_array_param";
-    test_conn t; chc_err err = {0};
+    test_conn t; chc_err err = {};
     int rc = open_conn(&t, &err); CHECK_OK(rc, err);
 
     /* Pre-escaped Array(String) literal: outer quote, inner quotes as
@@ -616,7 +661,7 @@ test_select_with_array_param(void)
     rc = chc_client_send_query_ex(t.c, sql, strlen(sql), &opts, &err);
     CHECK_OK(rc, err);
 
-    setting_acc acc = {0};
+    setting_acc acc = {};
     rc = recv_until_eos(&t, 32, array_param_cb, &acc, &err);
     CHECK_OK(rc, err);
     CHECK(acc.saw_value);
@@ -628,7 +673,7 @@ static void
 test_select_many_lz4(void)
 {
     current_test = "select_many_lz4";
-    test_conn t; chc_err err = {0};
+    test_conn t; chc_err err = {};
     int rc = open_conn_compressed(&t, CHC_COMP_LZ4, &err); CHECK_OK(rc, err);
 
     /* 10 000 rows pushes the body past one LZ4 frame. */
@@ -637,7 +682,7 @@ test_select_many_lz4(void)
     rc = send_query(&t, sql, &err);
     CHECK_OK(rc, err);
 
-    select_many_acc acc = {0};
+    select_many_acc acc = {};
     rc = recv_until_eos(&t, 256, select_many_cb, &acc, &err);
     CHECK_OK(rc, err);
     CHECK(acc.total_rows == 10000);
@@ -651,7 +696,7 @@ run_insert_compressed_roundtrip(chc_compression comp, const char *table,
                                 bool set_zstd)
 {
     test_conn t;
-    chc_err err = {0};
+    chc_err err = {};
     uint32_t *xs = NULL;
     chc_block_builder *bb = NULL;
     chc_type *u32 = NULL;
@@ -716,7 +761,7 @@ run_insert_compressed_roundtrip(chc_compression comp, const char *table,
     rc = send_query(&t, sql, &err);
     CHECK_OK(rc, err);
 
-    count_sum_acc acc = {0};
+    count_sum_acc acc = {};
     rc = recv_until_eos(&t, 32, count_sum_cb, &acc, &err);
     CHECK_OK(rc, err);
     CHECK(acc.count == N);
@@ -746,7 +791,7 @@ static void
 test_select_many_zstd(void)
 {
     current_test = "select_many_zstd";
-    test_conn t; chc_err err = {0};
+    test_conn t; chc_err err = {};
     int rc = open_conn_compressed(&t, CHC_COMP_ZSTD, &err); CHECK_OK(rc, err);
 
     /* Server defaults to LZ4 for network responses; pin it to ZSTD so the
@@ -762,7 +807,7 @@ test_select_many_zstd(void)
     rc = send_query(&t, sql, &err);
     CHECK_OK(rc, err);
 
-    select_many_acc acc = {0};
+    select_many_acc acc = {};
     rc = recv_until_eos(&t, 256, select_many_cb, &acc, &err);
     CHECK_OK(rc, err);
     CHECK(acc.total_rows == 10000);
@@ -776,6 +821,49 @@ test_insert_zstd_roundtrip(void)
 {
     current_test = "insert_zstd_roundtrip";
     run_insert_compressed_roundtrip(CHC_COMP_ZSTD, "test_zstd", true);
+}
+
+/*
+ * QBit is experimental from ClickHouse 25.10 and Beta (on by default) from
+ * 26.1; older servers lack the type, so gate on the handshake version and
+ * skip below 25.10. allow_experimental_qbit_type enables it on 25.10..26.0
+ * and is a harmless obsolete alias afterwards; sent non-important so an
+ * eventual removal of the setting can't fail the query.
+ */
+static void
+test_qbit_live(void)
+{
+    current_test = "qbit_live";
+    test_conn t; chc_err err = {};
+    int rc = open_conn(&t, &err); CHECK_OK(rc, err);
+
+    const chc_server_info *si = chc_client_server_info(t.c);
+    CHECK(si != NULL);
+    if (!si || si->version_major < 25 ||
+        (si->version_major == 25 && si->version_minor < 10)) {
+        fprintf(stderr, "qbit_live: server %llu.%llu < 25.10, skipping QBit\n",
+                (unsigned long long) (si ? si->version_major : 0),
+                (unsigned long long) (si ? si->version_minor : 0));
+        goto out;
+    }
+
+    chc_query_setting settings[1] = {
+        { .name = "allow_experimental_qbit_type", .value = "1",
+          .important = false },
+    };
+    chc_query_opts opts = { .settings = settings, .n_settings = 1 };
+
+    const char *sql =
+        "SELECT CAST(arrayWithConstant(16, toFloat32(1)) AS QBit(Float32, 16)) AS q";
+    rc = chc_client_send_query_ex(t.c, sql, strlen(sql), &opts, &err);
+    CHECK_OK(rc, err);
+
+    qbit_acc acc = {};
+    rc = recv_until_eos(&t, 32, qbit_cb, &acc, &err);
+    CHECK_OK(rc, err);
+    CHECK(acc.saw);
+out:
+    close_conn(&t);
 }
 
 static void
@@ -833,6 +921,7 @@ int main(void)
     test_insert_lz4_roundtrip();
     test_select_many_zstd();
     test_insert_zstd_roundtrip();
+    test_qbit_live();
 
     stop_server();
 

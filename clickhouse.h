@@ -187,6 +187,7 @@ typedef enum chc_kind {
     CHC_POINT, CHC_RING, CHC_POLYGON, CHC_MULTI_POLYGON,
     CHC_VARIANT, CHC_DYNAMIC, CHC_JSON, CHC_OBJECT,
     CHC_AGGREGATE_FUNCTION, CHC_SIMPLE_AGGREGATE_FUNCTION,
+    CHC_QBIT,
     CHC_NOTHING,
     CHC_KIND_COUNT
 } chc_kind;
@@ -206,6 +207,13 @@ size_t       chc_type_elem_size(const chc_type *t);
 int          chc_type_decimal_precision(const chc_type *t);
 int          chc_type_decimal_scale(const chc_type *t);
 int          chc_type_datetime64_scale(const chc_type *t);
+
+/* QBit(T, N): N (vector dimension). 0 on non-QBit types. The element type
+ * (BFloat16/Float32/Float64) is children[0], reached via chc_type_child(t, 0). */
+size_t       chc_type_qbit_dimension(const chc_type *t);
+/* QBit element width in bits: 16/32/64. 0 on non-QBit types. Equals the
+ * number of FixedString bit-plane columns the column decodes into. */
+size_t       chc_type_qbit_element_size(const chc_type *t);
 const char  *chc_type_timezone(const chc_type *t, size_t *out_len);
 const char  *chc_type_name(const chc_type *t, size_t *out_len);
 
@@ -245,8 +253,7 @@ chc_col_kind chc_column_layout(const chc_column *c);
 size_t       chc_column_n_rows(const chc_column *c);
 
 /* FIXED. Contiguous n_rows * (*elem_size) bytes, little-endian on the wire.
- * Caller swaps to host order if interpreting as a multi-byte host integer
- * & host is big-endian. */
+ * Caller responsible to fix endianness if necessary. */
 const void     *chc_column_fixed_data(const chc_column *c, size_t *elem_size);
 
 /* STRING. Row i's bytes are at data + (i == 0 ? 0 : offsets[i-1]) ..
@@ -469,8 +476,7 @@ CHC_NODISCARD int  chc_block_write(chc_io *io, const chc_block_builder *bb,
 
 /* Endianness detection.  CH wire format is little-endian. On BE hosts the
  * library byte-swaps the offsets/keys arrays it exposes through host-typed
- * pointers; FIXED slabs stay LE on the wire and the caller swaps when
- * interpreting. */
+ * pointers; FIXED slabs stay LE. */
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 #  define CHC_BIG_ENDIAN 1
 #else
@@ -1070,6 +1076,7 @@ struct chc_type {
         struct { int n; }                              fixed_string;  /* FixedString(N) */
         struct { int precision, scale; }               decimal;       /* Decimal(P, S) */
         struct { int scale; char *tz; size_t tz_len; } temporal;      /* DateTime / DateTime64 / Time64 */
+        struct { size_t dimension; }                   qbit;          /* QBit(T, N): N; element type in children[0] */
         struct {
             size_t n;
             struct { char *name; uint32_t name_len; int16_t value; } *items;
@@ -1115,6 +1122,8 @@ const chc_type  *chc_type_child(const chc_type *t, size_t i)    { return (t && i
 int              chc_type_fixed_size(const chc_type *t)         { return t && t->kind == CHC_FIXED_STRING ? t->fixed_string.n : 0; }
 int              chc_type_decimal_scale(const chc_type *t)      { return (t && chc__kind_is_decimal(t->kind)) ? t->decimal.scale : 0; }
 int              chc_type_datetime64_scale(const chc_type *t)   { return (t && (t->kind == CHC_DATETIME64 || t->kind == CHC_TIME64)) ? t->temporal.scale : 0; }
+size_t           chc_type_qbit_dimension(const chc_type *t)     { return (t && t->kind == CHC_QBIT) ? t->qbit.dimension : 0; }
+size_t           chc_type_qbit_element_size(const chc_type *t)  { return (t && t->kind == CHC_QBIT && t->n_children == 1) ? chc_type_elem_size(t->children[0]) * 8 : 0; }
 const char      *chc_type_name(const chc_type *t, size_t *out_len) {
     if (out_len) *out_len = t ? t->name_len : 0;
     return t ? t->name : NULL;
@@ -1291,262 +1300,262 @@ chc__atoi64(const char *s, size_t n)
 #define CHC__NAME_TABLE_SEED 720ull
 struct chc__name_row { const char *name; chc_kind kind; };
 static const struct chc__name_row chc__name_table[CHC__NAME_TABLE_M] = {
-    [  0] = {0},
-    [  1] = {0},
-    [  2] = {0},
-    [  3] = {0},
+    [  0] = {},
+    [  1] = {},
+    [  2] = {},
+    [  3] = {},
     [  4] = {"Int32", CHC_INT32},
-    [  5] = {0},
-    [  6] = {0},
-    [  7] = {0},
+    [  5] = {},
+    [  6] = {},
+    [  7] = {},
     [  8] = {"Float32", CHC_FLOAT32},
-    [  9] = {0},
-    [ 10] = {0},
-    [ 11] = {0},
-    [ 12] = {0},
+    [  9] = {},
+    [ 10] = {},
+    [ 11] = {},
+    [ 12] = {},
     [ 13] = {"MultiPolygon", CHC_MULTI_POLYGON},
-    [ 14] = {0},
-    [ 15] = {0},
-    [ 16] = {0},
-    [ 17] = {0},
-    [ 18] = {0},
-    [ 19] = {0},
+    [ 14] = {},
+    [ 15] = {},
+    [ 16] = {},
+    [ 17] = {},
+    [ 18] = {},
+    [ 19] = {},
     [ 20] = {"DateTime", CHC_DATETIME},
     [ 21] = {"Dynamic", CHC_DYNAMIC},
-    [ 22] = {0},
-    [ 23] = {0},
-    [ 24] = {0},
-    [ 25] = {0},
-    [ 26] = {0},
-    [ 27] = {0},
-    [ 28] = {0},
-    [ 29] = {0},
+    [ 22] = {},
+    [ 23] = {},
+    [ 24] = {},
+    [ 25] = {},
+    [ 26] = {},
+    [ 27] = {},
+    [ 28] = {},
+    [ 29] = {},
     [ 30] = {"IntervalMinute", CHC_INTERVAL},
-    [ 31] = {0},
-    [ 32] = {0},
+    [ 31] = {},
+    [ 32] = {},
     [ 33] = {"Ring", CHC_RING},
-    [ 34] = {0},
-    [ 35] = {0},
+    [ 34] = {},
+    [ 35] = {},
     [ 36] = {"IntervalMicrosecond", CHC_INTERVAL},
     [ 37] = {"Decimal64", CHC_DECIMAL64},
-    [ 38] = {0},
-    [ 39] = {0},
+    [ 38] = {},
+    [ 39] = {},
     [ 40] = {"DateTime64", CHC_DATETIME64},
-    [ 41] = {0},
-    [ 42] = {0},
+    [ 41] = {},
+    [ 42] = {},
     [ 43] = {"Int128", CHC_INT128},
     [ 44] = {"Tuple", CHC_TUPLE},
-    [ 45] = {0},
-    [ 46] = {0},
-    [ 47] = {0},
+    [ 45] = {},
+    [ 46] = {},
+    [ 47] = {},
     [ 48] = {"IntervalDay", CHC_INTERVAL},
     [ 49] = {"Map", CHC_MAP},
     [ 50] = {"IntervalSecond", CHC_INTERVAL},
-    [ 51] = {0},
+    [ 51] = {},
     [ 52] = {"UInt8", CHC_UINT8},
-    [ 53] = {0},
-    [ 54] = {0},
+    [ 53] = {},
+    [ 54] = {},
     [ 55] = {"Enum16", CHC_ENUM16},
-    [ 56] = {0},
+    [ 56] = {},
     [ 57] = {"IntervalMillisecond", CHC_INTERVAL},
-    [ 58] = {0},
-    [ 59] = {0},
+    [ 58] = {},
+    [ 59] = {},
     [ 60] = {"Int8", CHC_INT8},
-    [ 61] = {0},
-    [ 62] = {0},
-    [ 63] = {0},
-    [ 64] = {0},
+    [ 61] = {},
+    [ 62] = {},
+    [ 63] = {},
+    [ 64] = {},
     [ 65] = {"IntervalHour", CHC_INTERVAL},
-    [ 66] = {0},
-    [ 67] = {0},
+    [ 66] = {},
+    [ 67] = {},
     [ 68] = {"UInt256", CHC_UINT256},
-    [ 69] = {0},
-    [ 70] = {0},
-    [ 71] = {0},
-    [ 72] = {0},
+    [ 69] = {},
+    [ 70] = {},
+    [ 71] = {},
+    [ 72] = {},
     [ 73] = {"Date32", CHC_DATE32},
     [ 74] = {"BFloat16", CHC_BFLOAT16},
-    [ 75] = {0},
-    [ 76] = {0},
-    [ 77] = {0},
-    [ 78] = {0},
-    [ 79] = {0},
-    [ 80] = {0},
-    [ 81] = {0},
-    [ 82] = {0},
+    [ 75] = {},
+    [ 76] = {},
+    [ 77] = {},
+    [ 78] = {},
+    [ 79] = {},
+    [ 80] = {},
+    [ 81] = {},
+    [ 82] = {},
     [ 83] = {"Nullable", CHC_NULLABLE},
-    [ 84] = {0},
-    [ 85] = {0},
-    [ 86] = {0},
-    [ 87] = {0},
-    [ 88] = {0},
+    [ 84] = {},
+    [ 85] = {},
+    [ 86] = {},
+    [ 87] = {},
+    [ 88] = {},
     [ 89] = {"IntervalMonth", CHC_INTERVAL},
-    [ 90] = {0},
-    [ 91] = {0},
-    [ 92] = {0},
-    [ 93] = {0},
-    [ 94] = {0},
-    [ 95] = {0},
-    [ 96] = {0},
-    [ 97] = {0},
-    [ 98] = {0},
-    [ 99] = {0},
-    [100] = {0},
+    [ 90] = {},
+    [ 91] = {},
+    [ 92] = {},
+    [ 93] = {},
+    [ 94] = {},
+    [ 95] = {},
+    [ 96] = {},
+    [ 97] = {},
+    [ 98] = {},
+    [ 99] = {},
+    [100] = {},
     [101] = {"UInt128", CHC_UINT128},
-    [102] = {0},
-    [103] = {0},
-    [104] = {0},
-    [105] = {0},
+    [102] = {},
+    [103] = {},
+    [104] = {},
+    [105] = {},
     [106] = {"Enum8", CHC_ENUM8},
-    [107] = {0},
-    [108] = {0},
-    [109] = {0},
-    [110] = {0},
+    [107] = {},
+    [108] = {},
+    [109] = {},
+    [110] = {},
     [111] = {"Void", CHC_VOID},
-    [112] = {0},
-    [113] = {0},
-    [114] = {0},
+    [112] = {},
+    [113] = {},
+    [114] = {},
     [115] = {"IPv4", CHC_IPV4},
-    [116] = {0},
-    [117] = {0},
-    [118] = {0},
-    [119] = {0},
+    [116] = {},
+    [117] = {},
+    [118] = {},
+    [119] = {},
     [120] = {"Variant", CHC_VARIANT},
     [121] = {"LowCardinality", CHC_LOW_CARDINALITY},
     [122] = {"Time64", CHC_TIME64},
     [123] = {"Decimal128", CHC_DECIMAL128},
-    [124] = {0},
-    [125] = {0},
-    [126] = {0},
-    [127] = {0},
-    [128] = {0},
-    [129] = {0},
+    [124] = {},
+    [125] = {},
+    [126] = {},
+    [127] = {},
+    [128] = {},
+    [129] = {},
     [130] = {"UInt64", CHC_UINT64},
-    [131] = {0},
+    [131] = {},
     [132] = {"UInt32", CHC_UINT32},
     [133] = {"Int16", CHC_INT16},
     [134] = {"JSON", CHC_JSON},
     [135] = {"SimpleAggregateFunction", CHC_SIMPLE_AGGREGATE_FUNCTION},
     [136] = {"IntervalNanosecond", CHC_INTERVAL},
-    [137] = {0},
-    [138] = {0},
-    [139] = {0},
-    [140] = {0},
-    [141] = {0},
-    [142] = {0},
-    [143] = {0},
-    [144] = {0},
-    [145] = {0},
-    [146] = {0},
-    [147] = {0},
-    [148] = {0},
-    [149] = {0},
+    [137] = {},
+    [138] = {},
+    [139] = {},
+    [140] = {"QBit", CHC_QBIT},
+    [141] = {},
+    [142] = {},
+    [143] = {},
+    [144] = {},
+    [145] = {},
+    [146] = {},
+    [147] = {},
+    [148] = {},
+    [149] = {},
     [150] = {"Nothing", CHC_NOTHING},
     [151] = {"Date", CHC_DATE},
-    [152] = {0},
-    [153] = {0},
-    [154] = {0},
-    [155] = {0},
-    [156] = {0},
+    [152] = {},
+    [153] = {},
+    [154] = {},
+    [155] = {},
+    [156] = {},
     [157] = {"IPv6", CHC_IPV6},
-    [158] = {0},
-    [159] = {0},
-    [160] = {0},
-    [161] = {0},
-    [162] = {0},
-    [163] = {0},
-    [164] = {0},
-    [165] = {0},
-    [166] = {0},
-    [167] = {0},
+    [158] = {},
+    [159] = {},
+    [160] = {},
+    [161] = {},
+    [162] = {},
+    [163] = {},
+    [164] = {},
+    [165] = {},
+    [166] = {},
+    [167] = {},
     [168] = {"Array", CHC_ARRAY},
-    [169] = {0},
-    [170] = {0},
-    [171] = {0},
+    [169] = {},
+    [170] = {},
+    [171] = {},
     [172] = {"Time", CHC_TIME},
-    [173] = {0},
-    [174] = {0},
-    [175] = {0},
-    [176] = {0},
+    [173] = {},
+    [174] = {},
+    [175] = {},
+    [176] = {},
     [177] = {"Object", CHC_OBJECT},
     [178] = {"Decimal32", CHC_DECIMAL32},
-    [179] = {0},
-    [180] = {0},
-    [181] = {0},
-    [182] = {0},
+    [179] = {},
+    [180] = {},
+    [181] = {},
+    [182] = {},
     [183] = {"Decimal256", CHC_DECIMAL256},
-    [184] = {0},
-    [185] = {0},
-    [186] = {0},
-    [187] = {0},
-    [188] = {0},
+    [184] = {},
+    [185] = {},
+    [186] = {},
+    [187] = {},
+    [188] = {},
     [189] = {"UUID", CHC_UUID},
-    [190] = {0},
-    [191] = {0},
-    [192] = {0},
-    [193] = {0},
-    [194] = {0},
-    [195] = {0},
-    [196] = {0},
-    [197] = {0},
-    [198] = {0},
-    [199] = {0},
-    [200] = {0},
-    [201] = {0},
-    [202] = {0},
-    [203] = {0},
-    [204] = {0},
-    [205] = {0},
+    [190] = {},
+    [191] = {},
+    [192] = {},
+    [193] = {},
+    [194] = {},
+    [195] = {},
+    [196] = {},
+    [197] = {},
+    [198] = {},
+    [199] = {},
+    [200] = {},
+    [201] = {},
+    [202] = {},
+    [203] = {},
+    [204] = {},
+    [205] = {},
     [206] = {"Nested", CHC_NESTED},
-    [207] = {0},
-    [208] = {0},
-    [209] = {0},
-    [210] = {0},
+    [207] = {},
+    [208] = {},
+    [209] = {},
+    [210] = {},
     [211] = {"Polygon", CHC_POLYGON},
-    [212] = {0},
-    [213] = {0},
+    [212] = {},
+    [213] = {},
     [214] = {"String", CHC_STRING},
-    [215] = {0},
-    [216] = {0},
-    [217] = {0},
+    [215] = {},
+    [216] = {},
+    [217] = {},
     [218] = {"AggregateFunction", CHC_AGGREGATE_FUNCTION},
     [219] = {"Int256", CHC_INT256},
-    [220] = {0},
-    [221] = {0},
-    [222] = {0},
+    [220] = {},
+    [221] = {},
+    [222] = {},
     [223] = {"UInt16", CHC_UINT16},
     [224] = {"IntervalQuarter", CHC_INTERVAL},
-    [225] = {0},
-    [226] = {0},
-    [227] = {0},
-    [228] = {0},
-    [229] = {0},
-    [230] = {0},
-    [231] = {0},
+    [225] = {},
+    [226] = {},
+    [227] = {},
+    [228] = {},
+    [229] = {},
+    [230] = {},
+    [231] = {},
     [232] = {"Bool", CHC_BOOL},
-    [233] = {0},
-    [234] = {0},
-    [235] = {0},
+    [233] = {},
+    [234] = {},
+    [235] = {},
     [236] = {"FixedString", CHC_FIXED_STRING},
     [237] = {"Int64", CHC_INT64},
-    [238] = {0},
-    [239] = {0},
-    [240] = {0},
-    [241] = {0},
-    [242] = {0},
-    [243] = {0},
-    [244] = {0},
+    [238] = {},
+    [239] = {},
+    [240] = {},
+    [241] = {},
+    [242] = {},
+    [243] = {},
+    [244] = {},
     [245] = {"IntervalYear", CHC_INTERVAL},
     [246] = {"Float64", CHC_FLOAT64},
-    [247] = {0},
-    [248] = {0},
-    [249] = {0},
-    [250] = {0},
-    [251] = {0},
-    [252] = {0},
+    [247] = {},
+    [248] = {},
+    [249] = {},
+    [250] = {},
+    [251] = {},
+    [252] = {},
     [253] = {"IntervalWeek", CHC_INTERVAL},
     [254] = {"Point", CHC_POINT},
-    [255] = {0},
+    [255] = {},
 };
 /* AUTO-GENERATED-NAME-TABLE-END */
 
@@ -1746,6 +1755,38 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE, "Object: expected name");
             }
+        } else if (t->kind == CHC_QBIT) {
+            /* QBit(ElementType, N): element float type then positive dimension.
+             * Wire form is Tuple(FixedString(ceil(N/8)) x element_size); keep
+             * the element type as the sole child & stash N for the decoder. */
+            chc_type *elem = NULL;
+            int rc = chc__parse_type(lx, al, whole_start, whole_end, depth + 1, &elem, err);
+            if (rc != CHC_OK) { chc_type_destroy(t, al); return rc; }
+            rc = chc__type_push_child(al, t, elem, err);
+            if (rc != CHC_OK) { chc_type_destroy(elem, al); chc_type_destroy(t, al); return rc; }
+            if (elem->kind != CHC_BFLOAT16 && elem->kind != CHC_FLOAT32 && elem->kind != CHC_FLOAT64) {
+                chc_type_destroy(t, al);
+                return chc__err_set(err, CHC_ERR_TYPE,
+                    "QBit: element type must be BFloat16, Float32, or Float64");
+            }
+            chc__tok cm = chc__eat_tok(lx);
+            if (cm.kind != CHC__TOK_COMMA) {
+                chc_type_destroy(t, al);
+                return chc__err_set(err, CHC_ERR_TYPE, "QBit: expected ','");
+            }
+            chc__tok num = chc__eat_tok(lx);
+            if (num.kind != CHC__TOK_NUMBER) {
+                chc_type_destroy(t, al);
+                return chc__err_set(err, CHC_ERR_TYPE, "QBit: expected dimension");
+            }
+            int64_t n = chc__atoi64(num.start, num.len);
+            /* Nested FixedString width is ceil(N/8); bound it as FixedString is. */
+            if (n <= 0 || ((uint64_t) n + 7) / 8 > CHC_MAX_FIXEDSTRING_SIZE) {
+                chc_type_destroy(t, al);
+                return chc__err_set(err, CHC_ERR_TYPE,
+                    "QBit: dimension out of range: %lld", (long long) n);
+            }
+            t->qbit.dimension = (size_t) n;
         } else {
             /* Generic composite: comma-separated type list. Tuple children
              * may carry an optional leading NAME (field label) before the
@@ -1760,7 +1801,7 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                 chc__tok la = chc__peek_tok(lx);
                 if (la.kind == CHC__TOK_RPAREN) break;
 
-                chc__tok field = {0};
+                chc__tok field = {};
                 bool has_field = false;
                 if (is_tuple && la.kind == CHC__TOK_NAME) {
                     chc__eat_tok(lx);
@@ -1891,7 +1932,7 @@ int
 chc_type_parse(const char *name, size_t name_len,
                const chc_alloc *al, chc_type **out, chc_err *err)
 {
-    chc__lex lx = { name, name + name_len, {0}, false };
+    chc__lex lx = { name, name + name_len, {}, false };
     int rc = chc__parse_type(&lx, al, name, name + name_len, 0, out, err);
     if (rc != CHC_OK) return rc;
     chc__tok tail = chc__eat_tok(&lx);
@@ -2329,6 +2370,29 @@ chc__col_read(chc_in *in, const chc_type *t,
         for (size_t i = 0; i < t->n_children; i++) {
             int rc = chc__col_read(in, t->children[i], n_rows,
                                    &c->tuple.children[i], err);
+            if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
+        }
+        *out = c;
+        return CHC_OK;
+    }
+
+    case CHC_QBIT: {
+        /* Wire form is Tuple(FixedString(ceil(N/8)) x element_size): one
+         * bit-plane column per element bit, MSB plane first. */
+        size_t bits = chc_type_qbit_element_size(t);
+        if (!bits || t->n_children != 1)
+            return chc__err_set(err, CHC_ERR_TYPE, "QBit: invalid element type");
+        size_t bytes_per_plane = (t->qbit.dimension + 7) / 8;
+        chc_column *c = chc__calloc(al, sizeof *c, err);
+        if (!c) return CHC_ERR_OOM;
+        c->layout = CHC_COL_TUPLE;
+        c->n_rows = n_rows;
+        c->tuple.arity = bits;
+        c->tuple.children = chc__calloc(al, bits * sizeof *c->tuple.children, err);
+        if (!c->tuple.children) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
+        for (size_t i = 0; i < bits; i++) {
+            int rc = chc__col_read_fixed(in, bytes_per_plane, n_rows,
+                                         &c->tuple.children[i], err);
             if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
         }
         *out = c;
@@ -2803,7 +2867,7 @@ chc_block_read(chc_io *io, const chc_alloc *al,
                const chc_block_opts *opts,
                chc_block **out, chc_err *err)
 {
-    chc_block_opts def = {0};
+    chc_block_opts def = {};
     if (!opts) opts = &def;
     chc_in in;
     int rc = chc_in_init(&in, io, al, opts->read_buffer_bytes, err);
@@ -3468,7 +3532,7 @@ int
 chc_block_write(chc_io *io, const chc_block_builder *bb,
                 const chc_block_opts *opts, chc_err *err)
 {
-    chc_block_opts def = {0};
+    chc_block_opts def = {};
     if (!opts) opts = &def;
 
     if (opts->has_block_info) {

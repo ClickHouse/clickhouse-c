@@ -10,13 +10,20 @@ have_liburing() {
 }
 if have_liburing; then uring=1; else uring=0; fi
 
+# Per-test output buffered to its own log; main thread replays logs in test
+# order so parallel runs stay readable. .fail marker => that test failed.
+logdir=$(mktemp -d "${TMPDIR:-/tmp}/chc_test.XXXXXX")
+trap 'rm -rf "$logdir"' EXIT
+
 run_one() {
     local name=$1
     local src=test/test_${name}.c
     local bin=/tmp/chc_test_${name}
+    local log=$logdir/$name.log
 
     if [[ ! -f $src ]]; then
-        echo "no such test: $name" >&2
+        echo "no such test: $name" > "$log"
+        : > "$logdir/$name.fail"
         return 2
     fi
 
@@ -31,14 +38,20 @@ run_one() {
         libs+=(-luring -llz4)
     fi
 
-    cc -std=c11 -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE \
-       -O2 -Wall -Wextra -Wno-unused-parameter -I. \
-        "${defs[@]}" ${CFLAGS:-} ${LDFLAGS:-} \
-       "$src" -o "$bin" "${libs[@]}" || return 1
-
-    echo "== $name =="
-    "$bin"
+    {
+        echo "== $name =="
+        if cc -std=c11 -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE \
+              -O2 -Wall -Wextra -Wno-unused-parameter -I. \
+              "${defs[@]}" ${CFLAGS:-} ${LDFLAGS:-} \
+              "$src" -o "$bin" "${libs[@]}"; then
+            "$bin" || { echo "(exit $?)"; : > "$logdir/$name.fail"; }
+        else
+            : > "$logdir/$name.fail"
+        fi
+    } > "$log" 2>&1
 }
+export -f run_one
+export uring logdir CFLAGS LDFLAGS
 
 tests=()
 if (( $# == 0 )); then
@@ -52,9 +65,16 @@ else
     done
 fi
 
+# Independent binaries, distinct ports/temp dirs => safe to build + run in
+# parallel. Override width with JOBS=.
+jobs=${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}
+printf '%s\n' "${tests[@]}" \
+    | xargs -P "$jobs" -I{} bash -c 'run_one "$1"' _ {}
+
 fails=0
 for t in "${tests[@]}"; do
-    run_one "$t" || fails=$((fails + 1))
+    [[ -f $logdir/$t.log ]] && cat "$logdir/$t.log"
+    [[ -f $logdir/$t.fail ]] && fails=$((fails + 1))
 done
 
 if (( fails > 0 )); then

@@ -418,7 +418,7 @@ int
 chc_client_init(chc_client **out, const chc_client_opts *opts,
                 const chc_alloc *al, chc_io *io, chc_err *err)
 {
-    chc_client_opts def_opts = {0};
+    chc_client_opts def_opts = {};
     if (!opts) opts = &def_opts;
 
     chc_client *c = chc__calloc(al, sizeof *c, err);
@@ -569,7 +569,7 @@ int
 chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
                          const chc_query_opts *opts, chc_err *err)
 {
-    chc_query_opts def = {0};
+    chc_query_opts def = {};
     if (!opts) opts = &def;
 
     int rc;
@@ -585,7 +585,7 @@ chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
         if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* initial_query_id */
         if ((rc = chc__write_string(c->io, "[::ffff:127.0.0.1]:0", 20, err))) return rc;
         if (c->server.revision >= CHC__REV_INITIAL_QUERY_START) {
-            uint8_t z8[8] = {0};
+            uint8_t z8[8] = {};
             if ((rc = chc__write_bytes(c->io, z8, 8, err))) return rc;  /* int64 */
         }
         uint8_t iface_type = 1;       /* TCP */

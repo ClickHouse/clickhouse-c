@@ -78,7 +78,7 @@ codecs starts from a zero-initialised `chc_codec` & calls both inits in
 either order:
 
 ```c
-chc_codec codec = {0};
+chc_codec codec = {};
 chc_lz4_codec_init (&codec);
 chc_zstd_codec_init(&codec);
 ```

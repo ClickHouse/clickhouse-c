@@ -59,7 +59,7 @@ decode_resume(const uint8_t *bytes, size_t len, size_t chunk, const chc_alloc *a
         chc_block *partial = NULL;
         size_t next_col = 0;
         for (;;) {
-            chc_err e = {0};
+            chc_err e = {};
             int rc = chc__block_resume_in(&in, al, opts, &partial, &next_col, &e);
             if (rc == CHC_OK && partial) break;
             if (rc == CHC_WOULD_BLOCK) {
@@ -102,14 +102,14 @@ test_resume_golden(void)
 {
     current_test = "resume_golden";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
     chc_block_opts opts = { .has_block_info = true, .has_custom_serialization = true };
 
     size_t len = 0;
     uint8_t *stream = test_build_golden_stream(&al, &opts, 5000, &len);
     CHECK(stream != NULL); if (!stream) return;
 
-    chc_block *oracle[TEST_GOLDEN_BLOCKS] = {0};
+    chc_block *oracle[TEST_GOLDEN_BLOCKS] = {};
     uint64_t oracle_consumed = 0;
     int rc = test_decode_blocks_io(stream, len, &al, &opts, oracle,
                                    TEST_GOLDEN_BLOCKS, &oracle_consumed, &err);
@@ -124,9 +124,9 @@ test_resume_golden(void)
 
     static const size_t chunks[] = { 1, 2, 3, 7, 64, 1u << 20 };
     for (size_t ci = 0; ci < sizeof chunks / sizeof *chunks; ci++) {
-        chc_block *subj[TEST_GOLDEN_BLOCKS] = {0};
+        chc_block *subj[TEST_GOLDEN_BLOCKS] = {};
         uint64_t subj_consumed = 0;
-        chc_err e = {0};
+        chc_err e = {};
         int sr = decode_resume(stream, len, chunks[ci], &al, &opts, subj,
                                &subj_consumed, NULL, &e);
         if (sr != 0) {
@@ -173,10 +173,10 @@ test_resume_retains(void)
     uint8_t *stream = test_build_golden_stream(&al, &opts, 5000, &len);
     CHECK(stream != NULL); if (!stream) return;
 
-    chc_block *subj[TEST_GOLDEN_BLOCKS] = {0};
+    chc_block *subj[TEST_GOLDEN_BLOCKS] = {};
     uint64_t subj_consumed = 0;
-    resume_stats st = {0};
-    chc_err e = {0};
+    resume_stats st = {};
+    chc_err e = {};
     int sr = decode_resume(stream, len, 7, &al, &opts, subj, &subj_consumed, &st, &e);
     if (sr != 0) {
         fprintf(stderr, "%s: decode failed: %s\n", current_test, e.msg);
