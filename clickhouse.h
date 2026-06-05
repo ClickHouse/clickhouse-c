@@ -2564,122 +2564,216 @@ const chc_column *chc_block_column(const chc_block *b, size_t i)
 bool              chc_block_is_overflows(const chc_block *b) { return b ? b->is_overflows : false; }
 int32_t           chc_block_bucket_num(const chc_block *b)   { return b ? b->bucket_num : 0; }
 
-/* Block read using an already-initialised chc_in. Used by chc_block_read
- * (one-shot) and by clickhouse-client.h's recv_packet (persistent buffer).
- * Returns 0 with *out == NULL on clean EOF at block boundary (only when
- * opts->has_block_info is false; TCP path has no clean-EOF concept). */
+/* Resumable block reader. Continues a (possibly partial) block parse across
+ * CHC_WOULD_BLOCK without re-parsing completed columns. Owns the `in`
+ * checkpoint/rewind at packet-start and per-column granularity.
+ *
+ *   *blk == NULL : fresh packet. Checkpoint packet start, alloc block, parse
+ *                  block-info header + ncols/nrows + per-column arrays, then
+ *                  read columns from index 0.
+ *   *blk != NULL : resume. Header already parsed; continue at *next_col,
+ *                  re-reading only the in-progress column.
+ *
+ * Per-column retain is active only for ioless in (in->io == NULL). For
+ * io-backed in (blocking socket, or the compressed dec_in wrapper) it behaves
+ * as baseline: never sets a checkpoint (io-backed refill clobbers the mark),
+ * and on any non-OK frees the partial block and returns.
+ *
+ * On CHC_WOULD_BLOCK (ioless only):
+ *   - mid-header (only when *blk was NULL): rewind to packet start, free the
+ *     block, leave *blk == NULL.
+ *   - mid-column i: retain *blk with columns [0,i) intact, free column i's
+ *     partial slot allocations, set *next_col = i, rewind in to the column-i
+ *     checkpoint.
+ * On CHC_OK: *blk is the completed block (ownership to caller), *next_col == ncols.
+ * On real error: free *blk, set it NULL. */
 static int
-chc__block_read_in(chc_in *in, const chc_alloc *al,
-                   const chc_block_opts *opts, chc_block **out, chc_err *err)
+chc__block_resume_in(chc_in *in, const chc_alloc *al,
+                     const chc_block_opts *opts,
+                     chc_block **blk, size_t *next_col, chc_err *err)
 {
-    chc_block *b = chc__calloc(al, sizeof *b, err);
-    if (!b) return CHC_ERR_OOM;
+    bool ioless = in->io == NULL;
+    chc_block *b = *blk;
     int rc;
-    uint64_t consumed_before = in->consumed;
 
-    if (opts->has_block_info) {
-        uint64_t fid;
-        rc = chc__read_varuint(in, &fid, err);
-        if (rc == CHC_ERR_EOF && in->consumed == consumed_before) {
+    if (b == NULL) {
+        b = chc__calloc(al, sizeof *b, err);
+        if (!b) return CHC_ERR_OOM;
+        uint64_t consumed_before = in->consumed;
+
+        /* Checkpoint packet start so a mid-header would-block rewinds here. */
+        if (ioless) chc__in_checkpoint(in);
+
+        if (opts->has_block_info) {
+            uint64_t fid;
+            rc = chc__read_varuint(in, &fid, err);
+            if (rc == CHC_ERR_EOF && in->consumed == consumed_before) {
+                chc_block_destroy(b, al);
+                *blk = NULL;
+                chc_err_reset(err);
+                return CHC_OK;
+            }
+            if (rc != CHC_OK) goto header_fail;
+            if (fid != 1) { rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+                                "BlockInfo: expected field 1, got %llu",
+                                (unsigned long long) fid); goto header_fail; }
+            uint8_t ov;
+            rc = chc__read_byte(in, &ov, err); if (rc != CHC_OK) goto header_fail;
+            b->is_overflows = ov != 0;
+            rc = chc__read_varuint(in, &fid, err); if (rc != CHC_OK) goto header_fail;
+            if (fid != 2) { rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+                                "BlockInfo: expected field 2"); goto header_fail; }
+            uint32_t bn;
+            rc = chc__read_u32_le(in, &bn, err); if (rc != CHC_OK) goto header_fail;
+            b->bucket_num = (int32_t) bn;
+            rc = chc__read_varuint(in, &fid, err); if (rc != CHC_OK) goto header_fail;
+            if (fid != 0) { rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+                                "BlockInfo: expected terminator"); goto header_fail; }
+        }
+
+        uint64_t ncols, nrows;
+        rc = chc__read_varuint(in, &ncols, err);
+        if (rc == CHC_ERR_EOF && !opts->has_block_info
+            && in->consumed == consumed_before) {
             chc_block_destroy(b, al);
-            *out = NULL;
+            *blk = NULL;
             chc_err_reset(err);
             return CHC_OK;
         }
-        if (rc != CHC_OK) goto fail;
-        if (fid != 1) { rc = chc__err_set(err, CHC_ERR_PROTOCOL,
-                            "BlockInfo: expected field 1, got %llu",
-                            (unsigned long long) fid); goto fail; }
-        uint8_t ov;
-        rc = chc__read_byte(in, &ov, err); if (rc != CHC_OK) goto fail;
-        b->is_overflows = ov != 0;
-        rc = chc__read_varuint(in, &fid, err); if (rc != CHC_OK) goto fail;
-        if (fid != 2) { rc = chc__err_set(err, CHC_ERR_PROTOCOL,
-                            "BlockInfo: expected field 2"); goto fail; }
-        uint32_t bn;
-        rc = chc__read_u32_le(in, &bn, err); if (rc != CHC_OK) goto fail;
-        b->bucket_num = (int32_t) bn;
-        rc = chc__read_varuint(in, &fid, err); if (rc != CHC_OK) goto fail;
-        if (fid != 0) { rc = chc__err_set(err, CHC_ERR_PROTOCOL,
-                            "BlockInfo: expected terminator"); goto fail; }
-    }
+        if (rc != CHC_OK) goto header_fail;
+        rc = chc__read_varuint(in, &nrows, err);
+        if (rc != CHC_OK) goto header_fail;
 
-    uint64_t ncols, nrows;
-    rc = chc__read_varuint(in, &ncols, err);
-    if (rc == CHC_ERR_EOF && !opts->has_block_info
-        && in->consumed == consumed_before) {
-        chc_block_destroy(b, al);
-        *out = NULL;
-        chc_err_reset(err);
-        return CHC_OK;
-    }
-    if (rc != CHC_OK) goto fail;
-    rc = chc__read_varuint(in, &nrows, err);
-    if (rc != CHC_OK) goto fail;
-
-    if (ncols > CHC_MAX_NUM_COLUMNS) {
-        rc = chc__err_set(err, CHC_ERR_PROTOCOL,
-            "suspiciously many columns: %llu", (unsigned long long) ncols);
-        goto fail;
-    }
-    if (nrows > CHC_MAX_NUM_ROWS) {
-        rc = chc__err_set(err, CHC_ERR_PROTOCOL,
-            "suspiciously many rows: %llu", (unsigned long long) nrows);
-        goto fail;
-    }
-
-    b->n_columns = (size_t) ncols;
-    b->n_rows    = (size_t) nrows;
-    if (ncols) {
-        b->names     = chc__calloc(al, ncols * sizeof *b->names,     err);
-        b->name_lens = chc__calloc(al, ncols * sizeof *b->name_lens, err);
-        b->types     = chc__calloc(al, ncols * sizeof *b->types,     err);
-        b->columns   = chc__calloc(al, ncols * sizeof *b->columns,   err);
-        if (!b->names || !b->name_lens || !b->types || !b->columns) {
-            rc = CHC_ERR_OOM; goto fail;
+        if (ncols > CHC_MAX_NUM_COLUMNS) {
+            rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+                "suspiciously many columns: %llu", (unsigned long long) ncols);
+            goto header_fail;
         }
+        if (nrows > CHC_MAX_NUM_ROWS) {
+            rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+                "suspiciously many rows: %llu", (unsigned long long) nrows);
+            goto header_fail;
+        }
+
+        b->n_columns = (size_t) ncols;
+        b->n_rows    = (size_t) nrows;
+        if (ncols) {
+            b->names     = chc__calloc(al, ncols * sizeof *b->names,     err);
+            b->name_lens = chc__calloc(al, ncols * sizeof *b->name_lens, err);
+            b->types     = chc__calloc(al, ncols * sizeof *b->types,     err);
+            b->columns   = chc__calloc(al, ncols * sizeof *b->columns,   err);
+            if (!b->names || !b->name_lens || !b->types || !b->columns) {
+                rc = CHC_ERR_OOM; goto header_fail;
+            }
+        }
+
+        /* Header fully parsed; commit the block and start at column 0. */
+        *blk = b;
+        *next_col = 0;
     }
 
-    for (size_t i = 0; i < (size_t) ncols; i++) {
-        rc = chc__read_string(in, &b->names[i], &b->name_lens[i], err);
-        if (rc != CHC_OK) goto fail;
+    size_t nrows = b->n_rows;
+    for (size_t i = *next_col; i < b->n_columns; i++) {
+        char *type_name = NULL; size_t type_len = 0;
 
-        char *type_name; size_t type_len;
+        /* Checkpoint column start so a mid-column would-block rewinds here,
+         * dropping completed columns' wire bytes on the caller's next submit. */
+        if (ioless) chc__in_checkpoint(in);
+
+        rc = chc__read_string(in, &b->names[i], &b->name_lens[i], err);
+        if (rc != CHC_OK) goto col_fail;
+
         rc = chc__read_string(in, &type_name, &type_len, err);
-        if (rc != CHC_OK) goto fail;
+        if (rc != CHC_OK) goto col_fail;
 
         if (opts->has_custom_serialization) {
             uint8_t hcs;
             rc = chc__read_byte(in, &hcs, err);
-            if (rc != CHC_OK) { al->free(al->ud, type_name, type_len + 1); goto fail; }
+            if (rc != CHC_OK) goto col_fail;
             if (hcs) {
                 rc = chc__err_set(err, CHC_ERR_PROTOCOL,
                     "custom serialization not supported on column '%s'", b->names[i]);
-                al->free(al->ud, type_name, type_len + 1);
-                goto fail;
+                goto col_fail;
             }
         }
 
         rc = chc_type_parse(type_name, type_len, al, &b->types[i], err);
         al->free(al->ud, type_name, type_len + 1);
-        if (rc != CHC_OK) goto fail;
+        type_name = NULL;
+        if (rc != CHC_OK) goto col_fail;
 
         if (nrows) {
             rc = chc__col_read_prefix(in, b->types[i], err);
-            if (rc != CHC_OK) goto fail;
+            if (rc != CHC_OK) goto col_fail;
 
-            rc = chc__col_read(in, b->types[i], (size_t) nrows,
-                               &b->columns[i], err);
-            if (rc != CHC_OK) goto fail;
+            rc = chc__col_read(in, b->types[i], nrows, &b->columns[i], err);
+            if (rc != CHC_OK) goto col_fail;
         }
+        continue;
+
+    col_fail:
+        if (ioless && rc == CHC_WOULD_BLOCK) {
+            /* Retain columns [0,i); reset slot i to a destroy-safe NULL state
+             * and rewind so column i re-parses from its checkpoint. */
+            if (type_name) al->free(al->ud, type_name, type_len + 1);
+            if (b->names[i]) {
+                al->free(al->ud, b->names[i], b->name_lens[i] + 1);
+                b->names[i] = NULL;
+                b->name_lens[i] = 0;
+            }
+            chc_type_destroy(b->types[i], al);
+            b->types[i] = NULL;
+            chc__column_destroy(b->columns[i], al);
+            b->columns[i] = NULL;
+            chc__in_rewind(in);
+            *next_col = i;
+            return CHC_WOULD_BLOCK;
+        }
+        if (type_name) al->free(al->ud, type_name, type_len + 1);
+        chc_block_destroy(b, al);
+        *blk = NULL;
+        return rc;
     }
 
-    *out = b;
+    *next_col = b->n_columns;
     return CHC_OK;
 
-fail:
+header_fail:
+    if (ioless && rc == CHC_WOULD_BLOCK) chc__in_rewind(in);
     chc_block_destroy(b, al);
-    *out = NULL;
+    *blk = NULL;
+    return rc;
+}
+
+/* Block read using an already-initialised chc_in. Used by chc_block_read
+ * (one-shot) and by clickhouse-client.h's recv_packet (persistent buffer).
+ * Thin non-looping wrapper over chc__block_resume_in. Returns 0 with
+ * *out == NULL on clean EOF at block boundary (only when opts->has_block_info
+ * is false; TCP path has no clean-EOF concept). */
+static int
+chc__block_read_in(chc_in *in, const chc_alloc *al,
+                   const chc_block_opts *opts, chc_block **out, chc_err *err)
+{
+    /* Snapshot to roll back resume's per-column checkpoint progress: this
+     * non-resuming entry is baseline (rewind to packet start), so a would-block
+     * must leave `in` exactly as found. Callers that own the packet-start
+     * checkpoint/rewind (chc_block_read's io-backed in, the legacy ioless
+     * driver) then see untouched mark/pos/consumed. */
+    size_t   entry_pos = in->pos, entry_mark = in->mark;
+    uint64_t entry_consumed = in->consumed;
+    chc_block *blk = NULL;
+    size_t next_col = 0;
+    int rc = chc__block_resume_in(in, al, opts, &blk, &next_col, err);
+    /* io-backed callers never see WOULD_BLOCK; the compressed dec_in path may
+     * (propagated from the underlying ioless raw in), in which case the async
+     * recv driver rewinds the raw in to packet start -- baseline. */
+    if (rc == CHC_WOULD_BLOCK) {
+        if (blk) { chc_block_destroy(blk, al); blk = NULL; }
+        in->pos = entry_pos;
+        in->mark = entry_mark;
+        in->consumed = entry_consumed;
+    }
+    *out = blk;
     return rc;
 }
 

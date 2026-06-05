@@ -102,6 +102,7 @@ wiring; a stdlib `malloc`/`realloc`/`free` helper is available behind
 |---|---|---|
 | [`clickhouse.h`](doc/clickhouse.md) | Core: types, errors, `chc_alloc`, `chc_io`, type-name parser, block reader & writer | — |
 | [`clickhouse-client.h`](doc/clickhouse-client.md) | TCP packet loop: Hello / Query / Data / EOS / Exception / Progress / Pong | — |
+| [`clickhouse-async.h`](doc/clickhouse-async.md) | Ioless client: same packet loop driven by caller byte submission, no socket | — |
 | [`clickhouse-compression.h`](doc/clickhouse-compression.md) | Compressed-frame layout, CityHash128, `chc_codec` dispatch, LZ4 & ZSTD adapters (opt out with `CHC_NO_LZ4` / `CHC_NO_ZSTD`) | `-llz4 -lzstd` |
 | [`clickhouse-posix-io.h`](doc/clickhouse-posix-io.md) | `chc_io` over blocking `read(2)`/`write(2)` with EINTR loop & cancel hook | — |
 | [`clickhouse-openssl.h`](doc/clickhouse-openssl.md) | `chc_io` over `SSL_read`/`SSL_write` | `-lssl -lcrypto` |
@@ -139,9 +140,11 @@ pass their base names (without the trailing `.c`) as arguments:
 * DNS, endpoint round-robin, connection pooling, retry/backoff.
 * SSL/TLS context lifecycle. `chc_io` callbacks; caller drives OpenSSL.
 * Threading. Each `chc_client` is single-threaded by design.
-* Async I/O. Caller's `chc_io.read` can do whatever it wants under
-  the hood (epoll, io_uring, `WaitLatchOrSocket`), but the library calls
-  it synchronously.
+* Async I/O inside the library. The blocking client calls `chc_io.read`
+  synchronously (the callback may do whatever it wants under the hood —
+  epoll, io_uring, `WaitLatchOrSocket`). For an ioless client that performs
+  no I/O at all, driven by caller byte submission in an event loop, see
+  [`clickhouse-async.h`](doc/clickhouse-async.md).
 * `Variant` / `Dynamic` / `JSON` / `AggregateFunction` decoding in v1. The
   upstream wire format is still shifting in 25.x / 26.x.
 

@@ -228,7 +228,24 @@ struct chc_client {
     uint64_t         client_revision;
     chc_compression  compression;
     const chc_codec *codec;
+
+    /* Meaningful only for an ioless `chc_in`.
+     * io-backed refill blocks inside reader, so packet always completes,
+     * leaving these at reset values across calls. */
+    int              recv_in_block;  /* 0 = at packet boundary; 1 = mid block-bearing packet */
+    chc_packet_kind  recv_kind;      /* committed kind for the in-progress block */
+    chc_block       *recv_partial;   /* retained partial block (uncompressed resume) */
+    size_t           recv_next_col;  /* resume column index */
 };
+
+/* Free retained recv-resume state. Safe at any packet boundary or teardown. */
+static void
+chc__client_recv_state_free(chc_client *c)
+{
+    if (c->recv_partial) { chc_block_destroy(c->recv_partial, c->al); c->recv_partial = NULL; }
+    c->recv_in_block = 0;
+    c->recv_next_col = 0;
+}
 
 void
 chc_exception_free(chc_exception *e, const chc_alloc *al)
@@ -348,6 +365,35 @@ chc__client_recv_hello(chc_client *c, chc_err *err)
     return CHC_OK;
 }
 
+static int
+chc__recv_pong(chc_client *c, chc_err *err)
+{
+    bool ioless = c->in.io == NULL;
+    if (ioless) chc__in_checkpoint(&c->in);
+    uint64_t kind;
+    int rc = chc__read_varuint(&c->in, &kind, err);
+    if (rc != CHC_OK) goto maybe_rewind;
+    if (kind == CHC_PKT_EXCEPTION) {
+        chc_exception *e = NULL;
+        rc = chc__read_exception(c, &e, err);  /* frees its partial on non-OK */
+        if (rc != CHC_OK) goto maybe_rewind;
+        chc__err_set(err, CHC_ERR_SERVER, "%s",
+                     e->display_text ? e->display_text : (e->name ? e->name : ""));
+        err->server_code = e->code;
+        chc__copy_short(err->server_name, sizeof err->server_name,
+                        e->name, e->name_len);
+        chc_exception_free(e, c->al);
+        return CHC_ERR_SERVER;
+    }
+    if (kind != CHC_PKT_PONG)
+        return chc__err_set(err, CHC_ERR_PROTOCOL, "expected Pong, got %llu",
+                            (unsigned long long) kind);
+    return CHC_OK;
+maybe_rewind:
+    if (ioless && rc == CHC_WOULD_BLOCK) chc__in_rewind(&c->in);
+    return rc;
+}
+
 int
 chc_client_init(chc_client **out, const chc_client_opts *opts,
                 const chc_alloc *al, chc_io *io, chc_err *err)
@@ -393,31 +439,8 @@ chc_client_init(chc_client **out, const chc_client_opts *opts,
      * SetPingBeforeQuery posture for the connection-establishment case. */
     rc = chc_client_send_ping(c, err);
     if (rc != CHC_OK) goto fail;
-    {
-        uint64_t kind;
-        rc = chc__read_varuint(&c->in, &kind, err);
-        if (rc != CHC_OK) goto fail;
-        if (kind == CHC_PKT_EXCEPTION) {
-            chc_exception *e = NULL;
-            rc = chc__read_exception(c, &e, err);
-            if (rc != CHC_OK) goto fail;
-            chc__err_set(err, CHC_ERR_SERVER, "%s",
-                         e->display_text ? e->display_text :
-                         (e->name ? e->name : ""));
-            err->server_code = e->code;
-            chc__copy_short(err->server_name, sizeof err->server_name,
-                            e->name, e->name_len);
-            chc_exception_free(e, c->al);
-            rc = CHC_ERR_SERVER;
-            goto fail;
-        }
-        if (kind != CHC_PKT_PONG) {
-            rc = chc__err_set(err, CHC_ERR_PROTOCOL,
-                              "expected Pong, got %llu",
-                              (unsigned long long) kind);
-            goto fail;
-        }
-    }
+    rc = chc__recv_pong(c, err);
+    if (rc != CHC_OK) goto fail;
 
     *out = c;
     return CHC_OK;
@@ -433,6 +456,7 @@ void
 chc_client_close(chc_client *c)
 {
     if (!c) return;
+    chc__client_recv_state_free(c);
     chc_in_free(&c->in);
     c->al->free(c->al->ud, c, sizeof *c);
 }
@@ -638,37 +662,6 @@ chc_client_send_query(chc_client *c, const char *sql, size_t sql_len,
     return chc_client_send_query_ex(c, sql, sql_len, &opts, err);
 }
 
-static int
-chc__client_read_data_packet(chc_client *c, chc_packet *out, chc_err *err)
-{
-    int rc;
-    if (c->server.revision >= CHC__REV_TEMPORARY_TABLES) {
-        char *s; size_t slen;
-        if ((rc = chc__read_string(&c->in, &s, &slen, err))) return rc;
-        c->al->free(c->al->ud, s, slen + 1);
-    }
-    chc_block_opts opts = {
-        .has_block_info = c->server.revision >= CHC__REV_BLOCK_INFO,
-        .has_custom_serialization = c->server.revision >= CHC__REV_CUSTOM_SERIALIZATION,
-    };
-    if (c->compression == CHC_COMP_NONE) {
-        return chc__block_read_in(&c->in, c->al, &opts, &out->block, err);
-    }
-    if (!c->codec)
-        return chc__err_set(err, CHC_ERR_USAGE,
-                            "compression enabled but codec is NULL");
-    chc__decomp_src src;
-    chc_io decomp_io;
-    chc__decomp_src_init(&src, &c->in, c->codec, c->al, &decomp_io);
-    chc_in dec_in;
-    rc = chc_in_init(&dec_in, &decomp_io, c->al, 0, err);
-    if (rc != CHC_OK) { chc__decomp_src_free(&src); return rc; }
-    rc = chc__block_read_in(&dec_in, c->al, &opts, &out->block, err);
-    chc_in_free(&dec_in);
-    chc__decomp_src_free(&src);
-    return rc;
-}
-
 void
 chc_packet_clear(chc_client *c, chc_packet *p)
 {
@@ -686,93 +679,199 @@ chc_packet_clear(chc_client *c, chc_packet *p)
     }
 }
 
+/* Read the leading string a block-bearing packet carries before block body.
+ * DATA/TOTALS/EXTREMES gate a temp-table name on REV_TEMPORARY_TABLES (gated=1);
+ * LOG/PROFILE_EVENTS always prepend a tag (gated=0). */
+static int
+chc__recv_skip_lead_string(chc_client *c, int gated, chc_err *err)
+{
+    if (gated && c->server.revision < CHC__REV_TEMPORARY_TABLES)
+        return CHC_OK;
+    char *s; size_t slen;
+    int rc = chc__read_string(&c->in, &s, &slen, err);
+    if (rc != CHC_OK) return rc;
+    c->al->free(c->al->ud, s, slen + 1);
+    return CHC_OK;
+}
+
+/* Read one compressed block body from c->in into *out. Baseline: build a
+ * per-call decompressor + io-backed dec_in over the (possibly ioless) raw in
+ * and run the block reader. ioless: checkpoint raw at block start so a mid-
+ * decompress drain rewinds and re-decompresses from frame 0 on retry. Frame-
+ * granularity resumption is future work; when it lands
+ * it replaces this body with a persisted decomp + ioless dec_in pump loop. */
+static int
+chc__recv_block_compressed(chc_client *c, const chc_block_opts *opts,
+                           chc_block **out, chc_err *err)
+{
+    if (!c->codec)
+        return chc__err_set(err, CHC_ERR_USAGE,
+                            "compression enabled but codec is NULL");
+    bool ioless = c->in.io == NULL;
+    if (ioless) chc__in_checkpoint(&c->in);   /* raw in, at compressed block start */
+    chc__decomp_src src;
+    chc_io decomp_io;
+    chc__decomp_src_init(&src, &c->in, c->codec, c->al, &decomp_io);
+    chc_in dec_in;
+    int rc = chc_in_init(&dec_in, &decomp_io, c->al, 0, err);
+    if (rc != CHC_OK) { chc__decomp_src_free(&src); return rc; }
+    rc = chc__block_read_in(&dec_in, c->al, opts, out, err);
+    chc_in_free(&dec_in);
+    chc__decomp_src_free(&src);
+    if (ioless && rc == CHC_WOULD_BLOCK) chc__in_rewind(&c->in);
+    return rc;
+}
+
+/* Resumable packet decoder shared by chc_client_recv_packet and
+ * chc_async_recv_packet. For io-backed `in` refill blocks inside the reader.
+ * Ioless-gated checkpoints/resets are skipped, and a packet always completes
+ * in one call. For an ioless `in` it checkpoints at packet start and at each
+ * resumable boundary so a mid-parse drain returns CHC_WOULD_BLOCK with
+ * c->recv_* state retained for the next call.
+ *
+ * recv keeps parse state alive across CHC_WOULD_BLOCK: a Data block streamed
+ * over many reads resumes at the in-progress column (uncompressed, via
+ * chc__block_resume_in); compressed Data uses rewind-to-block-start. */
+static int
+chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
+{
+    bool ioless = c->in.io == NULL;
+    chc_block_opts opts = {
+        .has_block_info = c->server.revision >= CHC__REV_BLOCK_INFO,
+        .has_custom_serialization = c->server.revision >= CHC__REV_CUSTOM_SERIALIZATION,
+    };
+    int rc;
+    int is_log = 0;  /* LOG/PROFILE_EVENTS: never compressed */
+
+    memset(out, 0, sizeof *out);
+
+    if (!c->recv_in_block) {
+        if (ioless) chc__in_checkpoint(&c->in);   /* packet start */
+        uint64_t kind;
+        rc = chc__read_varuint(&c->in, &kind, err);
+        if (rc != CHC_OK) goto maybe_rewind;
+
+        switch (kind) {
+        /* ---- control / non-block packets: parse inline ---- */
+        case CHC_PKT_EXCEPTION:
+            out->kind = CHC_PKT_EXCEPTION;
+            rc = chc__read_exception(c, &out->exception, err);  /* frees its partial on non-OK */
+            if (rc != CHC_OK) goto maybe_rewind;
+            goto control_done;
+
+        case CHC_PKT_PROGRESS:
+            out->kind = CHC_PKT_PROGRESS;
+            if ((rc = chc__read_varuint(&c->in, &out->progress.rows,  err)) ||
+                (rc = chc__read_varuint(&c->in, &out->progress.bytes, err)))
+                goto maybe_rewind;
+            if (c->server.revision >= CHC__REV_TOTAL_ROWS_IN_PROGRESS)
+                if ((rc = chc__read_varuint(&c->in, &out->progress.total_rows, err)))
+                    goto maybe_rewind;
+            if (c->server.revision >= CHC__REV_CLIENT_WRITE_INFO) {
+                if ((rc = chc__read_varuint(&c->in, &out->progress.written_rows,  err)) ||
+                    (rc = chc__read_varuint(&c->in, &out->progress.written_bytes, err)))
+                    goto maybe_rewind;
+            }
+            goto control_done;
+
+        case CHC_PKT_PONG:
+            out->kind = CHC_PKT_PONG;
+            goto control_done;
+
+        case CHC_PKT_END_OF_STREAM:
+            out->kind = CHC_PKT_END_OF_STREAM;
+            goto control_done;
+
+        case CHC_PKT_PROFILE_INFO:
+            out->kind = CHC_PKT_PROFILE_INFO;
+            if ((rc = chc__read_varuint(&c->in, &out->profile.rows,   err)) ||
+                (rc = chc__read_varuint(&c->in, &out->profile.blocks, err)) ||
+                (rc = chc__read_varuint(&c->in, &out->profile.bytes,  err)) ||
+                (rc = chc__read_byte   (&c->in, &out->profile.applied_limit, err)) ||
+                (rc = chc__read_varuint(&c->in, &out->profile.rows_before_limit, err)) ||
+                (rc = chc__read_byte   (&c->in, &out->profile.calculated_rows_before_limit, err)))
+                goto maybe_rewind;
+            goto control_done;
+
+        case CHC_PKT_TABLE_COLUMNS: {
+            out->kind = CHC_PKT_TABLE_COLUMNS;
+            /* table name + columns metadata; both varstrings, both ignored. */
+            char *s; size_t slen;
+            if ((rc = chc__read_string(&c->in, &s, &slen, err))) goto maybe_rewind;
+            c->al->free(c->al->ud, s, slen + 1);
+            if ((rc = chc__read_string(&c->in, &s, &slen, err))) goto maybe_rewind;
+            c->al->free(c->al->ud, s, slen + 1);
+            goto control_done;
+        }
+
+        /* ---- block-bearing: commit kind + leading string, then resume ---- */
+        case CHC_PKT_DATA:    out->kind = c->recv_kind = CHC_PKT_DATA;     break;
+        case CHC_PKT_TOTALS:  out->kind = c->recv_kind = CHC_PKT_TOTALS;   break;
+        case CHC_PKT_EXTREMES:out->kind = c->recv_kind = CHC_PKT_EXTREMES; break;
+        case CHC_PKT_LOG:     out->kind = c->recv_kind = CHC_PKT_LOG;      is_log = 1; break;
+        case CHC_PKT_PROFILE_EVENTS:
+            out->kind = c->recv_kind = CHC_PKT_PROFILE_EVENTS; is_log = 1; break;
+
+        default:
+            return chc__err_set(err, CHC_ERR_PROTOCOL,
+                                "unknown server packet %llu",
+                                (unsigned long long) kind);
+        }
+
+        rc = chc__recv_skip_lead_string(c, !is_log, err);
+        if (rc != CHC_OK) goto maybe_rewind;
+
+        /* Kind + leading string committed; resume owns the cursor from here.
+         * Do NOT rewind/reset on a mid-block would-block: resume re-parses only
+         * from the in-progress column. */
+        c->recv_in_block = 1;
+        c->recv_partial = NULL;
+        c->recv_next_col = 0;
+    } else {
+        out->kind = c->recv_kind;
+        is_log = (c->recv_kind == CHC_PKT_LOG ||
+                  c->recv_kind == CHC_PKT_PROFILE_EVENTS);
+    }
+
+    /* LOG/PROFILE_EVENTS blocks are never compressed; route through the
+     * uncompressed resume path regardless of c->compression. */
+    if (c->compression == CHC_COMP_NONE || is_log) {
+        rc = chc__block_resume_in(&c->in, c->al, &opts,
+                                  &c->recv_partial, &c->recv_next_col, err);
+        if (rc == CHC_WOULD_BLOCK) return rc;  /* resume owns rewind; partial retained */
+        c->recv_in_block = 0;
+        if (rc != CHC_OK) {
+            c->recv_partial = NULL;  /* resume already freed it */
+            c->recv_next_col = 0;
+            return rc;
+        }
+        out->block = c->recv_partial;
+        c->recv_partial = NULL;
+        c->recv_next_col = 0;
+        if (ioless) chc_in_reset(&c->in);
+        return CHC_OK;
+    }
+
+    rc = chc__recv_block_compressed(c, &opts, &out->block, err);
+    if (rc == CHC_WOULD_BLOCK) return rc;
+    c->recv_in_block = 0;
+    if (rc != CHC_OK) return rc;
+    if (ioless) chc_in_reset(&c->in);
+    return CHC_OK;
+
+control_done:
+    if (ioless) chc_in_reset(&c->in);
+    return CHC_OK;
+
+maybe_rewind:
+    if (ioless && rc == CHC_WOULD_BLOCK) chc__in_rewind(&c->in);
+    return rc;
+}
+
 int
 chc_client_recv_packet(chc_client *c, chc_packet *out, chc_err *err)
 {
-    memset(out, 0, sizeof *out);
-    uint64_t kind;
-    int rc = chc__read_varuint(&c->in, &kind, err);
-    if (rc != CHC_OK) return rc;
-    out->kind = (chc_packet_kind) kind;
-
-    switch (kind) {
-    case CHC_PKT_DATA:
-        return chc__client_read_data_packet(c, out, err);
-
-    case CHC_PKT_TOTALS:
-        return chc__client_read_data_packet(c, out, err);
-
-    case CHC_PKT_EXTREMES:
-        return chc__client_read_data_packet(c, out, err);
-
-    case CHC_PKT_EXCEPTION:
-        return chc__read_exception(c, &out->exception, err);
-
-    case CHC_PKT_PROGRESS:
-        if ((rc = chc__read_varuint(&c->in, &out->progress.rows,  err))) return rc;
-        if ((rc = chc__read_varuint(&c->in, &out->progress.bytes, err))) return rc;
-        if (c->server.revision >= CHC__REV_TOTAL_ROWS_IN_PROGRESS)
-            if ((rc = chc__read_varuint(&c->in, &out->progress.total_rows, err))) return rc;
-        if (c->server.revision >= CHC__REV_CLIENT_WRITE_INFO) {
-            if ((rc = chc__read_varuint(&c->in, &out->progress.written_rows,  err))) return rc;
-            if ((rc = chc__read_varuint(&c->in, &out->progress.written_bytes, err))) return rc;
-        }
-        return CHC_OK;
-
-    case CHC_PKT_PONG:
-        return CHC_OK;
-
-    case CHC_PKT_END_OF_STREAM:
-        return CHC_OK;
-
-    case CHC_PKT_PROFILE_INFO:
-        if ((rc = chc__read_varuint(&c->in, &out->profile.rows,   err))) return rc;
-        if ((rc = chc__read_varuint(&c->in, &out->profile.blocks, err))) return rc;
-        if ((rc = chc__read_varuint(&c->in, &out->profile.bytes,  err))) return rc;
-        if ((rc = chc__read_byte   (&c->in, &out->profile.applied_limit, err))) return rc;
-        if ((rc = chc__read_varuint(&c->in, &out->profile.rows_before_limit, err))) return rc;
-        if ((rc = chc__read_byte   (&c->in, &out->profile.calculated_rows_before_limit, err))) return rc;
-        return CHC_OK;
-
-    case CHC_PKT_LOG: {
-        /* Log packets prepend an external-table name (always empty
-         * from CH server) before the block, never compressed. */
-        char *tag; size_t taglen;
-        if ((rc = chc__read_string(&c->in, &tag, &taglen, err))) return rc;
-        c->al->free(c->al->ud, tag, taglen + 1);
-        chc_block_opts opts = {
-            .has_block_info = c->server.revision >= CHC__REV_BLOCK_INFO,
-            .has_custom_serialization = c->server.revision >= CHC__REV_CUSTOM_SERIALIZATION,
-        };
-        return chc__block_read_in(&c->in, c->al, &opts, &out->block, err);
-    }
-
-    case CHC_PKT_TABLE_COLUMNS: {
-        /* table name + columns metadata; both are varstrings, both ignored. */
-        char *s; size_t slen;
-        if ((rc = chc__read_string(&c->in, &s, &slen, err))) return rc;
-        c->al->free(c->al->ud, s, slen + 1);
-        if ((rc = chc__read_string(&c->in, &s, &slen, err))) return rc;
-        c->al->free(c->al->ud, s, slen + 1);
-        return CHC_OK;
-    }
-
-    case CHC_PKT_PROFILE_EVENTS: {
-        char *tag; size_t taglen;
-        if ((rc = chc__read_string(&c->in, &tag, &taglen, err))) return rc;
-        c->al->free(c->al->ud, tag, taglen + 1);
-        chc_block_opts opts = {
-            .has_block_info = c->server.revision >= CHC__REV_BLOCK_INFO,
-            .has_custom_serialization = c->server.revision >= CHC__REV_CUSTOM_SERIALIZATION,
-        };
-        return chc__block_read_in(&c->in, c->al, &opts, &out->block, err);
-    }
-
-    default:
-        return chc__err_set(err, CHC_ERR_PROTOCOL,
-                            "unknown server packet %llu",
-                            (unsigned long long) kind);
-    }
+    return chc__recv_packet_resumable(c, out, err);
 }
 
 #endif /* CHC_IMPLEMENTATION */
