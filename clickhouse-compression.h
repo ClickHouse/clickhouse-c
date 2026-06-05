@@ -357,7 +357,7 @@ chc__mem_sink_write(void *ud, const void *p, size_t n, chc_err *err)
 static int chc__mem_sink_read(void *ud, void *b, size_t n, size_t *o, chc_err *e)
 { (void) ud; (void) b; (void) n; (void) o; (void) e; return -1; }
 
-static void
+CHC_MAYBE_UNUSED static void
 chc__mem_sink_init(chc__mem_sink *s, chc_io *io, const chc_alloc *al)
 {
     memset(s, 0, sizeof *s);
@@ -368,7 +368,7 @@ chc__mem_sink_init(chc__mem_sink *s, chc_io *io, const chc_alloc *al)
     io->check_cancel = NULL;
 }
 
-static void
+CHC_MAYBE_UNUSED static void
 chc__mem_sink_free(chc__mem_sink *s)
 {
     s->al->free(s->al->ud, s->buf, s->cap);
@@ -397,10 +397,10 @@ chc__comp_emit_chunks(chc_io *io, const chc_codec *codec, chc_compression m,
 /* ---------- decompression side ---------- */
 
 /* Adapter chc_io that produces decompressed bytes from a compressed
- * frame stream sourced from a chc__in. Each "frame" is read on demand;
+ * frame stream sourced from a chc_in. Each "frame" is read on demand;
  * we hold one frame's uncompressed bytes in scratch. */
 typedef struct chc__decomp_src {
-    chc__in         *raw;
+    chc_in          *raw;
     const chc_codec *codec;
     const chc_alloc *al;
     uint8_t         *frame_buf;
@@ -510,7 +510,7 @@ chc__decomp_io_write(void *ud, const void *b, size_t n, chc_err *e)
 { (void) ud; (void) b; (void) n; (void) e; return -1; }
 
 static void
-chc__decomp_src_init(chc__decomp_src *s, chc__in *raw, const chc_codec *codec,
+chc__decomp_src_init(chc__decomp_src *s, chc_in *raw, const chc_codec *codec,
                      const chc_alloc *al, chc_io *out_io)
 {
     memset(s, 0, sizeof *s);

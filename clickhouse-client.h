@@ -8,9 +8,6 @@
  * Caller owns the chc_io (socket setup, TLS, timeouts, cancel polling).
  * One chc_client wraps one connection. No reconnect / endpoint failover
  * / DNS — caller-side concerns.
- *
- * Compression: Phase 3b ships uncompressed only. When clickhouse-
- * compression.h ships, set opts.compression & opts.codec to enable it.
  */
 
 #ifndef CLICKHOUSE_CLIENT_H
@@ -225,7 +222,7 @@ int  chc_client_send_ping(chc_client *c, chc_err *err);
 struct chc_client {
     const chc_alloc *al;
     chc_io          *io;
-    chc__in          in;            /* persistent buffered input */
+    chc_in           in;            /* persistent buffered input */
 
     chc_server_info  server;
     uint64_t         client_revision;
@@ -244,7 +241,7 @@ chc_exception_free(chc_exception *e, const chc_alloc *al)
 }
 
 static int
-chc__read_i32_le(chc__in *in, int32_t *out, chc_err *err)
+chc__read_i32_le(chc_in *in, int32_t *out, chc_err *err)
 {
     uint32_t u;
     int rc = chc__read_u32_le(in, &u, err);
@@ -367,7 +364,7 @@ chc_client_init(chc_client **out, const chc_client_opts *opts,
     c->compression = opts->codec ? opts->compression : CHC_COMP_NONE;
     c->codec       = opts->codec;
 
-    int rc = chc__in_init(&c->in, io, al, opts->read_buffer_bytes, err);
+    int rc = chc_in_init(&c->in, io, al, opts->read_buffer_bytes, err);
     if (rc != CHC_OK) { al->free(al->ud, c, sizeof *c); return rc; }
 
     rc = chc__client_send_hello(c, opts, err);
@@ -426,7 +423,7 @@ chc_client_init(chc_client **out, const chc_client_opts *opts,
     return CHC_OK;
 
 fail:
-    chc__in_free(&c->in);
+    chc_in_free(&c->in);
     al->free(al->ud, c, sizeof *c);
     *out = NULL;
     return rc;
@@ -436,7 +433,7 @@ void
 chc_client_close(chc_client *c)
 {
     if (!c) return;
-    chc__in_free(&c->in);
+    chc_in_free(&c->in);
     c->al->free(c->al->ud, c, sizeof *c);
 }
 
@@ -663,11 +660,11 @@ chc__client_read_data_packet(chc_client *c, chc_packet *out, chc_err *err)
     chc__decomp_src src;
     chc_io decomp_io;
     chc__decomp_src_init(&src, &c->in, c->codec, c->al, &decomp_io);
-    chc__in dec_in;
-    rc = chc__in_init(&dec_in, &decomp_io, c->al, 0, err);
+    chc_in dec_in;
+    rc = chc_in_init(&dec_in, &decomp_io, c->al, 0, err);
     if (rc != CHC_OK) { chc__decomp_src_free(&src); return rc; }
     rc = chc__block_read_in(&dec_in, c->al, &opts, &out->block, err);
-    chc__in_free(&dec_in);
+    chc_in_free(&dec_in);
     chc__decomp_src_free(&src);
     return rc;
 }

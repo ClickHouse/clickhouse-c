@@ -15,6 +15,7 @@ run_one() {
 
     local libs=()
     [[ $name == client_tcp ]] && libs+=(-llz4 -lzstd)
+    [[ $name == ioless ]] && libs+=(-llz4)
     [[ $name == openssl_io ]] && libs+=(-lssl -lcrypto -lpthread)
 
     cc -std=c11 -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE \
