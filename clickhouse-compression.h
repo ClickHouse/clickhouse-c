@@ -371,7 +371,7 @@ chc__mem_sink_init(chc__mem_sink *s, chc_io *io, const chc_alloc *al)
 static void
 chc__mem_sink_free(chc__mem_sink *s)
 {
-    if (s->buf) s->al->free(s->al->ud, s->buf, s->cap);
+    s->al->free(s->al->ud, s->buf, s->cap);
     s->buf = NULL; s->cap = 0; s->len = 0;
 }
 
@@ -526,8 +526,8 @@ chc__decomp_src_init(chc__decomp_src *s, chc__in *raw, const chc_codec *codec,
 static void
 chc__decomp_src_free(chc__decomp_src *s)
 {
-    if (s->frame_buf) s->al->free(s->al->ud, s->frame_buf, s->frame_cap);
-    if (s->comp_buf)  s->al->free(s->al->ud, s->comp_buf,  s->comp_cap);
+    s->al->free(s->al->ud, s->frame_buf, s->frame_cap);
+    s->al->free(s->al->ud, s->comp_buf,  s->comp_cap);
     s->frame_buf = s->comp_buf = NULL;
     s->frame_cap = s->comp_cap = 0;
 }

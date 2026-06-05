@@ -70,9 +70,9 @@ make_keypair(EVP_PKEY **out_pkey, X509 **out_cert)
     *out_cert = cert;
     return 0;
 fail:
-    if (ctx) EVP_PKEY_CTX_free(ctx);
-    if (cert) X509_free(cert);
-    if (pkey) EVP_PKEY_free(pkey);
+    EVP_PKEY_CTX_free(ctx);
+    X509_free(cert);
+    EVP_PKEY_free(pkey);
     return -1;
 }
 
@@ -212,8 +212,8 @@ fixture_up(fixture *f, EVP_PKEY *pkey, X509 *cert, int mode)
 static void
 fixture_down(fixture *f)
 {
-    if (f->cli_ssl) { SSL_free(f->cli_ssl); f->cli_ssl = NULL; }
-    if (f->cli_ctx) { SSL_CTX_free(f->cli_ctx); f->cli_ctx = NULL; }
+    SSL_free(f->cli_ssl); f->cli_ssl = NULL;
+    SSL_CTX_free(f->cli_ctx); f->cli_ctx = NULL;
     if (f->cli_fd >= 0) { close(f->cli_fd); f->cli_fd = -1; }
     if (f->thread_started) { pthread_join(f->th, NULL); f->thread_started = false; }
     if (f->listen_fd >= 0) { close(f->listen_fd); f->listen_fd = -1; }
