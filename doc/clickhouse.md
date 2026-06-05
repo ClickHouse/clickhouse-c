@@ -20,6 +20,7 @@ enum {
     CHC_ERR_CANCELLED = 6,
     CHC_ERR_SERVER    = 7,
     CHC_ERR_USAGE     = 8,
+    CHC_WOULD_BLOCK   = 9,
 };
 
 typedef struct chc_err {
@@ -34,6 +35,10 @@ static inline void chc_err_reset(chc_err *e);
 
 Caller-stack-allocated; library never heap-allocates an error. Override
 `CHC_ERR_MSG_LEN` before including to resize `msg`.
+
+`CHC_WOULD_BLOCK` is not a failure: an ioless [buffered reader](#buffered-reader)
+returns it when a parse runs past the submitted bytes. Submit more and retry.
+The blocking io-backed path never produces it.
 
 ## Allocator
 
@@ -80,6 +85,45 @@ hard error (also recorded in `err`); a `read` returning `CHC_OK` with
 reads; non-zero aborts with `CHC_ERR_CANCELLED`. Ready-made backends:
 [clickhouse-posix-io.md](clickhouse-posix-io.md),
 [clickhouse-openssl.md](clickhouse-openssl.md).
+
+## Buffered reader
+
+```c
+typedef struct chc_in chc_in;
+
+int    chc_in_init       (chc_in *in, chc_io *io, const chc_alloc *al,
+                          size_t cap, chc_err *err);
+int    chc_in_init_ioless(chc_in *in, const chc_alloc *al);
+int    chc_in_submit     (chc_in *in, const void *buf, size_t len, chc_err *err);
+size_t chc_in_available  (const chc_in *in);   /* unconsumed bytes */
+void   chc_in_reset      (chc_in *in);         /* drop consumed, compact */
+void   chc_in_free       (chc_in *in);
+```
+
+`chc_in` is the staging buffer the block & packet parsers pull from. The block
+reader and [client](clickhouse-client.md) own one internally, so most callers
+never touch it; it is public for ioless drivers that submit bytes. Two modes:
+
+* **io-backed** — `chc_in_init` with a `chc_io`. The reader refills by calling
+  `io->read` on underrun, so a parse blocks in that callback until bytes arrive.
+  `cap` is the refill buffer size; `0` selects `CHC_READ_BUFFER` (8 KiB,
+  overridable via `#define`). `chc_in_submit` is a `CHC_ERR_USAGE` here.
+* **ioless** — `chc_in_init_ioless`, no `chc_io`. The caller pushes received
+  bytes with `chc_in_submit`; the buffer grows on demand (doubling). A parse
+  that runs past the submitted bytes returns `CHC_WOULD_BLOCK` instead of
+  blocking, leaving in-progress parser state intact so the same call can be
+  retried once more bytes are submitted.
+
+`chc_in_reset` drops the consumed prefix and compacts, keeping the unconsumed
+tail; call it only at a packet boundary, never mid-parse. `chc_in_available`
+reports bytes submitted but not yet consumed. `chc_in_free` releases the
+buffer.
+
+The ioless mode is the foundation of [clickhouse-async.h](clickhouse-async.md):
+the parser checkpoints at packet boundaries and rewinds on `CHC_WOULD_BLOCK`, so
+a Data block streamed over many reads resumes rather than re-parsing. That
+checkpoint/rewind machinery is internal; the public surface is the six calls
+above.
 
 ## Type AST
 
