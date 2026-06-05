@@ -34,7 +34,7 @@ test_clickhouse_connect(uint16_t port)
     if (fd < 0) return -1;
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-    struct sockaddr_in sa = {0};
+    struct sockaddr_in sa = {};
     sa.sin_family = AF_INET;
     sa.sin_port = htons(port);
     sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -81,7 +81,7 @@ test_clickhouse_wait_port(uint16_t port)
     for (int i = 0; i < 60; i++) {
         int probe = socket(AF_INET, SOCK_STREAM, 0);
         if (probe >= 0) {
-            struct sockaddr_in sa = {0};
+            struct sockaddr_in sa = {};
             sa.sin_family = AF_INET;
             sa.sin_port = htons(port);
             sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);

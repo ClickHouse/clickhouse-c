@@ -138,12 +138,12 @@ main(int argc, char **argv)
 
     /* clickhouse-local emits Native without BlockInfo or
      * has_custom_serialization (no protocol revision negotiated). */
-    chc_block_opts opts = {0};
+    chc_block_opts opts = {};
 
     int rc = 0;
     for (;;) {
         chc_block *block = NULL;
-        chc_err err = {0};
+        chc_err err = {};
         if (chc_block_read(&io, &al, &opts, &block, &err) != CHC_OK) {
             fprintf(stderr, "decode: %s\n", err.msg);
             rc = 1; break;

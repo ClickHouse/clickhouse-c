@@ -122,7 +122,7 @@ build_response_stream(const chc_alloc *al, const chc_block_opts *opts,
     test_mem_sink s;
     chc_io io;
     test_mem_sink_init(&s, &io);
-    chc_err err = {0};
+    chc_err err = {};
     if (write_data_packet_compressed(&io, al, opts, codec, BIG_ROWS, &err) ||
         write_data_packet_compressed(&io, al, opts, codec, MED_ROWS, &err) ||
         write_progress_packet(&io, &err) ||
@@ -194,7 +194,7 @@ oracle_decode(const uint8_t *bytes, size_t len, const chc_codec *codec,
 
     size_t n = 0;
     for (;;) {
-        chc_packet pkt = {0};
+        chc_packet pkt = {};
         int rc = chc_client_recv_packet(&c, &pkt, err);
         if (rc != CHC_OK) { chc_packet_clear(&c, &pkt); chc_in_free(&c.in); return -1; }
         rec_take(&out[n], &pkt);
@@ -217,7 +217,7 @@ subject_decode(const uint8_t *bytes, size_t len, size_t chunk,
                const chc_codec *codec, const chc_alloc *al,
                rec_packet *out, size_t *out_n, uint64_t *consumed, chc_err *err)
 {
-    chc_client_opts opts = {0};
+    chc_client_opts opts = {};
     opts.compression = CHC_COMP_LZ4;
     opts.codec = codec;
 
@@ -229,8 +229,8 @@ subject_decode(const uint8_t *bytes, size_t len, size_t chunk,
     size_t fed = 0;
     size_t n = 0;
     for (;;) {
-        chc_packet pkt = {0};
-        chc_err e = {0};
+        chc_packet pkt = {};
+        chc_err e = {};
         int rc = chc_async_recv_packet(c, &pkt, &e);
         if (rc == CHC_WOULD_BLOCK) {
             if (fed >= len) {
@@ -271,7 +271,7 @@ test_recv_golden_chunk_compressed(void)
 {
     current_test = "recv_golden_chunk_compressed";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
     chc_block_opts opts = { .has_block_info = true, .has_custom_serialization = true };
     chc_codec codec = make_counting_codec();
 
@@ -279,7 +279,7 @@ test_recv_golden_chunk_compressed(void)
     uint8_t *stream = build_response_stream(&al, &opts, &codec, &len);
     CHECK(stream != NULL); if (!stream) return;
 
-    rec_packet oracle[SEQ_LEN + 1] = {0};
+    rec_packet oracle[SEQ_LEN + 1] = {};
     size_t on = 0;
     uint64_t oracle_consumed = 0;
     g_decomp_calls = 0;
@@ -297,10 +297,10 @@ test_recv_golden_chunk_compressed(void)
 
     static const size_t chunks[] = { 1, 2, 3, 7, 64, 4096, 1u << 20 };
     for (size_t ci = 0; ci < sizeof chunks / sizeof *chunks; ci++) {
-        rec_packet subj[SEQ_LEN + 1] = {0};
+        rec_packet subj[SEQ_LEN + 1] = {};
         size_t sn = 0;
         uint64_t subj_consumed = 0;
-        chc_err e = {0};
+        chc_err e = {};
         g_decomp_calls = 0;
         if (subject_decode(stream, len, chunks[ci], &codec, &al,
                            subj, &sn, &subj_consumed, &e) != 0) {
@@ -374,7 +374,7 @@ test_teardown_mid_block(void)
 {
     current_test = "teardown_mid_block";
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {0};
+    chc_err err = {};
     chc_block_opts opts = { .has_block_info = true, .has_custom_serialization = true };
     chc_codec codec = make_counting_codec();
 
@@ -388,7 +388,7 @@ test_teardown_mid_block(void)
     }
     CHECK(s.len > 50);
 
-    chc_client_opts copts = {0};
+    chc_client_opts copts = {};
     copts.compression = CHC_COMP_LZ4;
     copts.codec = &codec;
     chc_async_client *c = NULL;
@@ -406,7 +406,7 @@ test_teardown_mid_block(void)
         fprintf(stderr, "%s: submit failed: %s\n", current_test, err.msg);
         fail_count++; chc_async_client_free(c); test_mem_sink_free(&s); return;
     }
-    chc_packet pkt = {0};
+    chc_packet pkt = {};
     int rc = chc_async_recv_packet(c, &pkt, &err);
     CHECK(rc == CHC_WOULD_BLOCK);
     CHECK(c->cli.recv_dec_active);          /* persisted decomp state is live */

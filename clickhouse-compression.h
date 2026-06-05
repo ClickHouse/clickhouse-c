@@ -178,7 +178,7 @@ chc__city_hash128_with_seed(const char *s, size_t len, chc__u128 seed)
 {
     if (len < 128) return chc__city_murmur(s, len, seed);
 
-    chc__u128 v = {0}, w = {0};
+    chc__u128 v = {}, w = {};
     uint64_t x = seed.a, y = seed.b;
     uint64_t z = len * chc__city_k1;
     v.a = chc__city_rotate(y ^ chc__city_k1, 49) * chc__city_k1 + chc__city_fetch64(s);

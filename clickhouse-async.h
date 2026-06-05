@@ -124,7 +124,7 @@ int
 chc_async_client_init(chc_async_client **out, const chc_client_opts *opts,
                       const chc_alloc *al, chc_err *err)
 {
-    chc_client_opts def_opts = {0};
+    chc_client_opts def_opts = {};
     if (!opts) opts = &def_opts;
 
     chc_async_client *c = chc__calloc(al, sizeof *c, err);

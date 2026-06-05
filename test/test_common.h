@@ -55,7 +55,7 @@
     }                                                               \
 } while (0)
 
-/* CHECK_OK: jumps to `out:` on failure. Pair with chc_err err = {0};
+/* CHECK_OK: jumps to `out:` on failure. Pair with chc_err err = {};
  * and an out: label that frees / closes / returns. */
 #define CHECK_OK(rc, err) do {                                      \
     if ((rc) != CHC_OK) {                                           \

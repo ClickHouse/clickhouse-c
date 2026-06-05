@@ -50,11 +50,11 @@ typedef struct chc_alloc {
 } chc_alloc;
 ```
 
-`alloc` may return NULL or `longjmp`; library treats both as OOM.
+`alloc` may return NULL, but arenas can safely `longjmp`.
 `old_bytes` lets a `new`/`delete`-backed allocator emulate `realloc` via
-copy-then-free. `free` may be a no-op for arena allocators (PG `palloc`).
+copy-then-free.
 
-Stdlib backend, gated on a define so it doesn't drag in `<stdlib.h>` for
+stdlib.h backend, gated on a define so it doesn't drag in `<stdlib.h>` for
 freestanding builds:
 
 ```c
@@ -62,9 +62,6 @@ freestanding builds:
 #include "clickhouse.h"
 chc_alloc al = chc_alloc_stdlib();
 ```
-
-PostgreSQL `palloc`/`repalloc`/`pfree` wiring: see
-[examples/pg_alloc_thunks.c](../examples/pg_alloc_thunks.c).
 
 ## I/O
 
@@ -153,6 +150,7 @@ typedef enum chc_kind {
     CHC_POINT, CHC_RING, CHC_POLYGON, CHC_MULTI_POLYGON,
     CHC_VARIANT, CHC_DYNAMIC, CHC_JSON, CHC_OBJECT,
     CHC_AGGREGATE_FUNCTION, CHC_SIMPLE_AGGREGATE_FUNCTION,
+    CHC_QBIT,
     CHC_NOTHING,
     CHC_KIND_COUNT
 } chc_kind;
@@ -179,6 +177,8 @@ int              chc_type_fixed_size        (const chc_type *t);
 int              chc_type_decimal_precision (const chc_type *t);
 int              chc_type_decimal_scale     (const chc_type *t);
 int              chc_type_datetime64_scale  (const chc_type *t);
+size_t           chc_type_qbit_dimension    (const chc_type *t);
+size_t           chc_type_qbit_element_size (const chc_type *t);
 const char      *chc_type_timezone          (const chc_type *t, size_t *out_len);
 const char      *chc_type_name              (const chc_type *t, size_t *out_len);
 
@@ -201,6 +201,14 @@ allocate & call again.
 32/64/128/256-bit. `chc_type_decimal_scale` returns the explicit `S`.
 
 `DateTime64` timezone is metadata only; ticks on the wire are UTC.
+
+`QBit(T, N)` is a bit-sliced vector type. `chc_type_qbit_dimension` is `N`;
+`chc_type_qbit_element_size` is the element width in bits (16 / 32 / 64 for
+`BFloat16` / `Float32` / `Float64`), and the element type itself is
+`chc_type_child(t, 0)`. On the wire QBit serializes as
+`Tuple(FixedString(ceil(N/8)) × element_size)` — one bit-plane column per
+element bit, MSB plane first — so it decodes to `CHC_COL_TUPLE`; see the
+column table.
 
 ## Columns
 
@@ -231,7 +239,7 @@ Caller dispatches on `chc_column_layout`:
 | `CHC_COL_STRING` | `chc_column_string_data(c)`, `chc_column_string_offsets(c)` — `offsets[i]` is row i's exclusive end, host byte order; row 0 starts at 0 |
 | `CHC_COL_NULLABLE` | `chc_column_null_map(c)` (1 byte per row, 1 = NULL), `chc_column_nullable_inner(c)` |
 | `CHC_COL_ARRAY` | `chc_column_array_offsets(c)` (cumulative ends, host byte order), `chc_column_array_values(c)`; Map decodes as Array(Tuple(K,V)) |
-| `CHC_COL_TUPLE` | `chc_column_tuple_arity(c)`, `chc_column_tuple_child(c, i)` — each child has the same row count |
+| `CHC_COL_TUPLE` | `chc_column_tuple_arity(c)`, `chc_column_tuple_child(c, i)` — each child has the same row count; QBit decodes as a tuple of `element_size` FixedString bit-plane columns |
 | `CHC_COL_LOW_CARDINALITY` | `chc_column_lc_key_size(c)` (1/2/4/8), `chc_column_lc_keys(c)` (host byte order), `chc_column_lc_dict(c)`; dict slot 0 is the default value; NULLs ride at slot 0 of inner Nullable |
 
 `chc_column_validate(c, &err)` walks a decoded column tree & enforces the
@@ -276,9 +284,19 @@ short read mid-block is `CHC_ERR_EOF`. The TCP packet loop in
 
 BlockInfo accessors return zero when `has_block_info == false`.
 
-Tier 4 types (`Variant`, `Dynamic`, `JSON`, `Object('json')`,
-`AggregateFunction`, `QBit`) return `CHC_ERR_TYPE`. Wire format still
-shifting in 25.x / 26.x. Consumer falls back to `CAST(... AS String)`.
+`JSON` & `Object('json')` decode only under string serialization: set
+`output_format_native_write_json_as_string=1` on the SELECT. Each row then
+arrives as one JSON document in a `CHC_COL_STRING` column, so the string
+accessors apply. Any other serialization version returns `CHC_ERR_TYPE`
+naming the setting.
+
+`QBit(T, N)` decodes to `CHC_COL_TUPLE`: `element_size` `FixedString(ceil(N/8))`
+bit-plane columns, MSB plane first. See [Type AST](#type-ast) for the dimension
+& element accessors.
+
+Remaining Tier 4 types (`Variant`, `Dynamic`, `AggregateFunction`) return
+`CHC_ERR_TYPE`. Wire format still shifting in 25.x / 26.x. Consumer falls
+back to `CAST(... AS String)`.
 
 `SimpleAggregateFunction(f, T)` decodes as `T` — wire is just T's stream.
 
@@ -328,6 +346,14 @@ int  chc_block_write(chc_io *io, const chc_block_builder *bb,
 Append calls record slab pointers; nothing is copied. Slabs must outlive
 `chc_block_write`. Offsets are cumulative exclusive ends in host byte
 order; fixed data is `n_rows * elem_size` little-endian bytes.
+
+Beyond `append_fixed` & `append_string`, matching helpers cover the common
+nested shapes: `append_nullable_fixed`, `append_nullable_string`,
+`append_array_fixed`, `append_array_string`, `append_array_nested_fixed`,
+`append_array_nested_string`, `append_low_cardinality_string`, &
+`append_json_string` (writes the 8-byte version-1 prefix, then the
+`append_string` wire shape; pairs with `output_format_native_write_json_as_string=1`).
+Signatures & per-call contracts are inline in `clickhouse.h`.
 
 For INSERT over TCP, hand the builder to `chc_client_send_data` rather
 than calling `chc_block_write` directly — the client sets the right

@@ -140,7 +140,7 @@ listen_loopback(int *out_port)
     if (fd < 0) return -1;
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    struct sockaddr_in sa = {0};
+    struct sockaddr_in sa = {};
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     sa.sin_port = 0;
@@ -159,7 +159,7 @@ connect_loopback(int port)
     if (fd < 0) return -1;
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-    struct sockaddr_in sa = {0};
+    struct sockaddr_in sa = {};
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     sa.sin_port = htons((uint16_t) port);
@@ -238,9 +238,9 @@ test_echo_roundtrip(EVP_PKEY *pkey, X509 *cert)
     CHECK(io.write != NULL);
     CHECK(io.check_cancel == NULL);
 
-    chc_err err = {0};
+    chc_err err = {};
     CHECK(io.write(io.ud, "hello", 5, &err) == CHC_OK);
-    char rb[8] = {0};
+    char rb[8] = {};
     size_t got = 0;
     CHECK(io.read(io.ud, rb, sizeof rb, &got, &err) == CHC_OK);
     CHECK(got == 5);
@@ -273,7 +273,7 @@ test_eof_after_handshake(EVP_PKEY *pkey, X509 *cert)
 
     char rb[16];
     size_t got = 99;
-    chc_err err = {0};
+    chc_err err = {};
     int rc = io.read(io.ud, rb, sizeof rb, &got, &err);
     CHECK(rc == CHC_OK);
     CHECK(got == 0);
@@ -302,13 +302,13 @@ test_cancel(EVP_PKEY *pkey, X509 *cert)
     CHECK(io.check_cancel(io.ud) == 0);
 
     g_cancel = true;
-    chc_err err = {0};
-    char rb[8] = {0};
+    chc_err err = {};
+    char rb[8] = {};
     size_t got = 99;
     int rc = io.read(io.ud, rb, 5, &got, &err);
     CHECK(rc == CHC_ERR_CANCELLED);
 
-    chc_err err2 = {0};
+    chc_err err2 = {};
     rc = io.write(io.ud, "x", 1, &err2);
     CHECK(rc == CHC_ERR_CANCELLED);
 

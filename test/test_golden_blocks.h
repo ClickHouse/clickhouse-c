@@ -112,7 +112,7 @@ test_build_golden_stream(const chc_alloc *al, const chc_block_opts *opts,
     test_mem_sink s;
     chc_io io;
     test_mem_sink_init(&s, &io);
-    chc_err err = {0};
+    chc_err err = {};
     if (test_write_uint_string_block(&io, al, opts, wide_rows, &err) ||
         test_write_nullable_array_block(&io, al, opts, &err) ||
         test_write_lc_string_block(&io, al, opts, &err)) {

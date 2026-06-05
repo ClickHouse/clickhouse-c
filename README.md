@@ -4,11 +4,10 @@ Header-only C client for the [ClickHouse](https://clickhouse.com/) Native wire
 format. One core header, plus optional follow-up headers for TCP, compression,
 codecs, and I/O backends.
 
-Designed first for embedding inside a PostgreSQL extension — `palloc` arena,
-`siglongjmp` error path — but with no PG-specific code in the library itself.
-Including `clickhouse.h` alone gives a pure block decoder over caller-supplied
-`chc_io`, usable for reading `clickhouse-local`'s `FORMAT Native` from a pipe
-with no TCP, no compression, no link-time deps beyond libc.
+Designed for embedding inside PostgreSQL extensions (`palloc` arena, `longjmp`)
+but with no PG-specific code. Including `clickhouse.h` alone gives a pure block
+decoder over caller-supplied `chc_io`, usable for reading `clickhouse-local`'s
+`FORMAT Native` from a pipe with no TCP, no compression, no link-time deps beyond libc.
 
 ## Quickstart
 
@@ -35,11 +34,11 @@ int main(void) {
     chc_io io;
     chc_posix_io_init(&state, &io, fd, NULL, NULL);
 
-    chc_block_opts opts = {0};   /* clickhouse-local: no BlockInfo, no custom serialization */
+    chc_block_opts opts = {};   /* clickhouse-local: no BlockInfo, no custom serialization */
 
     for (;;) {
         chc_block *block = NULL;
-        chc_err err = {0};
+        chc_err err = {};
         if (chc_block_read(&io, &al, &opts, &block, &err) != CHC_OK) {
             fprintf(stderr, "decode: %s\n", err.msg);
             return 1;
@@ -91,10 +90,11 @@ Other TUs include only the public declarations:
 /* no CHC_IMPLEMENTATION here */
 ```
 
-For PostgreSQL extension embedding, see
-[examples/pg_alloc_thunks.c](examples/pg_alloc_thunks.c) for `palloc`/`repalloc`/`pfree`
-wiring; a stdlib `malloc`/`realloc`/`free` helper is available behind
-`#define CHC_PROVIDE_STDLIB_ALLOC` before including `clickhouse.h`.
+A stdlib `malloc`/`realloc`/`free` helper is available behind
+`#define CHC_PROVIDE_STDLIB_ALLOC` before including `clickhouse.h`. For
+`palloc`/`repalloc`/`pfree` wiring inside a real PostgreSQL extension, see
+[pg_clickhouse](https://github.com/ClickHouse/pg_clickhouse) or
+[pg_stat_ch](https://github.com/ClickHouse/pg_stat_ch).
 
 ## Headers
 

@@ -212,7 +212,7 @@ static int
 recv_until_eos(loop_ctx *L, block_cb cb, void *ud, chc_err *err)
 {
     for (int i = 0; i < 1000000; i++) {
-        chc_packet pkt = {0};
+        chc_packet pkt = {};
         int rc = chc_async_recv_packet(L->cli, &pkt, err);
         if (rc == CHC_WOULD_BLOCK) {
             if (pump(L, err) != 0) return CHC_ERR_IO;
@@ -256,7 +256,7 @@ static void
 test_uring_select(loop_ctx *L)
 {
     current_test = suite_label(L, "uring_select");
-    chc_err err = {0};
+    chc_err err = {};
     /* N big enough that the result spans several 64 KiB recvs, proving recv
      * resumption across CHC_WOULD_BLOCK. */
     const uint64_t N = 200000;
@@ -266,7 +266,7 @@ test_uring_select(loop_ctx *L)
     int rc = chc_async_send_query(L->cli, sql, (size_t) sn, "", 0, &err);
     CHECK_OK(rc, err);
 
-    select_acc acc = {0};
+    select_acc acc = {};
     rc = recv_until_eos(L, select_cb, &acc, &err);
     CHECK_OK(rc, err);
     CHECK_EQ_U64(acc.rows, N);
@@ -281,7 +281,7 @@ static void
 test_uring_insert(loop_ctx *L)
 {
     current_test = suite_label(L, "uring_insert");
-    chc_err err = {0};
+    chc_err err = {};
     chc_block_builder *bb = NULL;
     chc_type *tu = NULL;
 
@@ -307,7 +307,7 @@ test_uring_insert(loop_ctx *L)
     /* Wait for the schema-echo Data packet before sending rows. */
     bool got_echo = false;
     for (int i = 0; i < 100000 && !got_echo; i++) {
-        chc_packet pkt = {0};
+        chc_packet pkt = {};
         rc = chc_async_recv_packet(L->cli, &pkt, &err);
         if (rc == CHC_WOULD_BLOCK) {
             if (pump(L, &err) != 0) { fail_count++; goto out; }
@@ -344,7 +344,7 @@ test_uring_insert(loop_ctx *L)
     bool eos = false;
     uint64_t sum = 0, rows = 0;
     for (int i = 0; i < 100000 && !eos; i++) {
-        chc_packet pkt = {0};
+        chc_packet pkt = {};
         rc = chc_async_recv_packet(L->cli, &pkt, &err);
         if (rc == CHC_WOULD_BLOCK) {
             if (pump(L, &err) != 0) { fail_count++; goto out; }
@@ -378,7 +378,7 @@ out:
 static void
 run_suite(const chc_client_opts *opts, const char *suite)
 {
-    chc_err err = {0};
+    chc_err err = {};
     loop_ctx L;
     memset(&L, 0, sizeof L);
     L.al = chc_alloc_stdlib();
@@ -462,7 +462,7 @@ main(void)
 
     chc_codec lz4;
     chc_lz4_codec_init(&lz4);
-    chc_client_opts comp = {0};
+    chc_client_opts comp = {};
     comp.compression = CHC_COMP_LZ4;
     comp.codec = &lz4;
     run_suite(&comp, "_lz4");
