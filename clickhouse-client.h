@@ -113,6 +113,7 @@ int  chc_client_send_query_ex(chc_client *c,
                               const chc_query_opts *opts, chc_err *err);
 
 typedef enum chc_packet_kind {
+    CHC_PKT_HELLO           = 0,
     CHC_PKT_DATA            = 1,
     CHC_PKT_EXCEPTION       = 2,
     CHC_PKT_PROGRESS        = 3,
@@ -144,25 +145,28 @@ void chc_exception_free(chc_exception *e, const chc_alloc *al);
 typedef struct chc_packet {
     chc_packet_kind kind;
 
-    /* CHC_PKT_DATA / TOTALS / EXTREMES / LOG / PROFILE_EVENTS:
-     * caller-owned chc_block, freed with chc_block_destroy. NULL for
-     * other kinds. */
-    chc_block *block;
+    /* Payload selected by kind; exactly one member is live, none for
+     * PONG / END_OF_STREAM / TABLE_COLUMNS. */
+    union {
+        /* CHC_PKT_DATA / TOTALS / EXTREMES / LOG / PROFILE_EVENTS:
+         * caller-owned chc_block, freed with chc_block_destroy. */
+        chc_block *block;
 
-    /* CHC_PKT_EXCEPTION: caller-owned, freed with chc_exception_free. */
-    chc_exception *exception;
+        /* CHC_PKT_EXCEPTION: caller-owned, freed with chc_exception_free. */
+        chc_exception *exception;
 
-    /* CHC_PKT_PROGRESS. */
-    struct {
-        uint64_t rows, bytes, total_rows;
-        uint64_t written_rows, written_bytes;  /* >= rev 54420 */
-    } progress;
+        /* CHC_PKT_PROGRESS. */
+        struct {
+            uint64_t rows, bytes, total_rows;
+            uint64_t written_rows, written_bytes;  /* >= rev 54420 */
+        } progress;
 
-    /* CHC_PKT_PROFILE_INFO. */
-    struct {
-        uint64_t rows, blocks, bytes, rows_before_limit;
-        uint8_t  applied_limit, calculated_rows_before_limit;
-    } profile;
+        /* CHC_PKT_PROFILE_INFO. */
+        struct {
+            uint64_t rows, blocks, bytes, rows_before_limit;
+            uint8_t  applied_limit, calculated_rows_before_limit;
+        } profile;
+    };
 } chc_packet;
 
 /* Read the next packet. On exception packets the caller MUST inspect
@@ -218,20 +222,6 @@ int  chc_client_send_ping(chc_client *c, chc_err *err);
 #define CHC__CLIENT_CANCEL 3u
 #define CHC__CLIENT_PING   4u
 
-/* Server → client packet kinds (only the ones we react on by tag). */
-#define CHC__SERVER_HELLO            0u
-#define CHC__SERVER_DATA             1u
-#define CHC__SERVER_EXCEPTION        2u
-#define CHC__SERVER_PROGRESS         3u
-#define CHC__SERVER_PONG             4u
-#define CHC__SERVER_END_OF_STREAM    5u
-#define CHC__SERVER_PROFILE_INFO     6u
-#define CHC__SERVER_TOTALS           7u
-#define CHC__SERVER_EXTREMES         8u
-#define CHC__SERVER_LOG             10u
-#define CHC__SERVER_TABLE_COLUMNS   11u
-#define CHC__SERVER_PROFILE_EVENTS  14u
-
 struct chc_client {
     const chc_alloc *al;
     chc_io          *io;
@@ -247,9 +237,9 @@ void
 chc_exception_free(chc_exception *e, const chc_alloc *al)
 {
     if (!e) return;
-    if (e->name)         al->free(al->ud, e->name,         e->name_len         + 1);
-    if (e->display_text) al->free(al->ud, e->display_text, e->display_text_len + 1);
-    if (e->stack_trace)  al->free(al->ud, e->stack_trace,  e->stack_trace_len  + 1);
+    al->free(al->ud, e->name,         e->name_len         + 1);
+    al->free(al->ud, e->display_text, e->display_text_len + 1);
+    al->free(al->ud, e->stack_trace,  e->stack_trace_len  + 1);
     al->free(al->ud, e, sizeof *e);
 }
 
@@ -319,7 +309,7 @@ chc__client_recv_hello(chc_client *c, chc_err *err)
     uint64_t kind;
     int rc = chc__read_varuint(&c->in, &kind, err);
     if (rc != CHC_OK) return rc;
-    if (kind == CHC__SERVER_EXCEPTION) {
+    if (kind == CHC_PKT_EXCEPTION) {
         chc_exception *e = NULL;
         rc = chc__read_exception(c, &e, err);
         if (rc != CHC_OK) return rc;
@@ -331,7 +321,7 @@ chc__client_recv_hello(chc_client *c, chc_err *err)
         chc_exception_free(e, c->al);
         return CHC_ERR_SERVER;
     }
-    if (kind != CHC__SERVER_HELLO)
+    if (kind != CHC_PKT_HELLO)
         return chc__err_set(err, CHC_ERR_PROTOCOL,
                             "expected Hello, got %llu",
                             (unsigned long long) kind);
@@ -410,7 +400,7 @@ chc_client_init(chc_client **out, const chc_client_opts *opts,
         uint64_t kind;
         rc = chc__read_varuint(&c->in, &kind, err);
         if (rc != CHC_OK) goto fail;
-        if (kind == CHC__SERVER_EXCEPTION) {
+        if (kind == CHC_PKT_EXCEPTION) {
             chc_exception *e = NULL;
             rc = chc__read_exception(c, &e, err);
             if (rc != CHC_OK) goto fail;
@@ -424,7 +414,7 @@ chc_client_init(chc_client **out, const chc_client_opts *opts,
             rc = CHC_ERR_SERVER;
             goto fail;
         }
-        if (kind != CHC__SERVER_PONG) {
+        if (kind != CHC_PKT_PONG) {
             rc = chc__err_set(err, CHC_ERR_PROTOCOL,
                               "expected Pong, got %llu",
                               (unsigned long long) kind);
@@ -686,8 +676,17 @@ void
 chc_packet_clear(chc_client *c, chc_packet *p)
 {
     if (!p) return;
-    if (p->block) { chc_block_destroy(p->block, c->al); p->block = NULL; }
-    if (p->exception) { chc_exception_free(p->exception, c->al); p->exception = NULL; }
+    switch (p->kind) {
+    case CHC_PKT_DATA: case CHC_PKT_TOTALS: case CHC_PKT_EXTREMES:
+    case CHC_PKT_LOG:  case CHC_PKT_PROFILE_EVENTS:
+        if (p->block) { chc_block_destroy(p->block, c->al); p->block = NULL; }
+        break;
+    case CHC_PKT_EXCEPTION:
+        if (p->exception) { chc_exception_free(p->exception, c->al); p->exception = NULL; }
+        break;
+    default:
+        break;
+    }
 }
 
 int
@@ -697,26 +696,22 @@ chc_client_recv_packet(chc_client *c, chc_packet *out, chc_err *err)
     uint64_t kind;
     int rc = chc__read_varuint(&c->in, &kind, err);
     if (rc != CHC_OK) return rc;
+    out->kind = (chc_packet_kind) kind;
 
     switch (kind) {
-    case CHC__SERVER_DATA:
-        out->kind = CHC_PKT_DATA;
+    case CHC_PKT_DATA:
         return chc__client_read_data_packet(c, out, err);
 
-    case CHC__SERVER_TOTALS:
-        out->kind = CHC_PKT_TOTALS;
+    case CHC_PKT_TOTALS:
         return chc__client_read_data_packet(c, out, err);
 
-    case CHC__SERVER_EXTREMES:
-        out->kind = CHC_PKT_EXTREMES;
+    case CHC_PKT_EXTREMES:
         return chc__client_read_data_packet(c, out, err);
 
-    case CHC__SERVER_EXCEPTION:
-        out->kind = CHC_PKT_EXCEPTION;
+    case CHC_PKT_EXCEPTION:
         return chc__read_exception(c, &out->exception, err);
 
-    case CHC__SERVER_PROGRESS:
-        out->kind = CHC_PKT_PROGRESS;
+    case CHC_PKT_PROGRESS:
         if ((rc = chc__read_varuint(&c->in, &out->progress.rows,  err))) return rc;
         if ((rc = chc__read_varuint(&c->in, &out->progress.bytes, err))) return rc;
         if (c->server.revision >= CHC__REV_TOTAL_ROWS_IN_PROGRESS)
@@ -727,16 +722,13 @@ chc_client_recv_packet(chc_client *c, chc_packet *out, chc_err *err)
         }
         return CHC_OK;
 
-    case CHC__SERVER_PONG:
-        out->kind = CHC_PKT_PONG;
+    case CHC_PKT_PONG:
         return CHC_OK;
 
-    case CHC__SERVER_END_OF_STREAM:
-        out->kind = CHC_PKT_END_OF_STREAM;
+    case CHC_PKT_END_OF_STREAM:
         return CHC_OK;
 
-    case CHC__SERVER_PROFILE_INFO:
-        out->kind = CHC_PKT_PROFILE_INFO;
+    case CHC_PKT_PROFILE_INFO:
         if ((rc = chc__read_varuint(&c->in, &out->profile.rows,   err))) return rc;
         if ((rc = chc__read_varuint(&c->in, &out->profile.blocks, err))) return rc;
         if ((rc = chc__read_varuint(&c->in, &out->profile.bytes,  err))) return rc;
@@ -745,8 +737,7 @@ chc_client_recv_packet(chc_client *c, chc_packet *out, chc_err *err)
         if ((rc = chc__read_byte   (&c->in, &out->profile.calculated_rows_before_limit, err))) return rc;
         return CHC_OK;
 
-    case CHC__SERVER_LOG: {
-        out->kind = CHC_PKT_LOG;
+    case CHC_PKT_LOG: {
         /* Log packets prepend an external-table name (always empty
          * from CH server) before the block, never compressed. */
         char *tag; size_t taglen;
@@ -759,8 +750,7 @@ chc_client_recv_packet(chc_client *c, chc_packet *out, chc_err *err)
         return chc__block_read_in(&c->in, c->al, &opts, &out->block, err);
     }
 
-    case CHC__SERVER_TABLE_COLUMNS: {
-        out->kind = CHC_PKT_TABLE_COLUMNS;
+    case CHC_PKT_TABLE_COLUMNS: {
         /* table name + columns metadata; both are varstrings, both ignored. */
         char *s; size_t slen;
         if ((rc = chc__read_string(&c->in, &s, &slen, err))) return rc;
@@ -770,8 +760,7 @@ chc_client_recv_packet(chc_client *c, chc_packet *out, chc_err *err)
         return CHC_OK;
     }
 
-    case CHC__SERVER_PROFILE_EVENTS: {
-        out->kind = CHC_PKT_PROFILE_EVENTS;
+    case CHC_PKT_PROFILE_EVENTS: {
         char *tag; size_t taglen;
         if ((rc = chc__read_string(&c->in, &tag, &taglen, err))) return rc;
         c->al->free(c->al->ud, tag, taglen + 1);
