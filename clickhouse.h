@@ -153,9 +153,13 @@ typedef struct chc_io {
  *    in-progress parse to be retried once more bytes arrive. */
 typedef struct chc_in chc_in;
 
+#ifndef CHC_NO_SYNC
 CHC_NODISCARD int    chc_in_init(chc_in *in, chc_io *io, const chc_alloc *al,
                                  size_t cap, chc_err *err);
+#endif
+#ifndef CHC_NO_ASYNC
 CHC_NODISCARD int    chc_in_init_ioless(chc_in *in, const chc_alloc *al);
+#endif
 CHC_NODISCARD int    chc_in_submit(chc_in *in, const void *buf, size_t len,
                                  chc_err *err);
 size_t               chc_in_available(const chc_in *in); /* unconsumed bytes */
@@ -747,6 +751,18 @@ chc_alloc chc_alloc_stdlib(void) {
 #define CHC_MAX_TYPE_DEPTH        300
 #endif
 
+/* Reader mode is normally chosen at runtime per `in` (io-backed vs ioless).
+ * Two opt-in macros fix it at compile time to optimize out other branches: */
+#if defined(CHC_NO_ASYNC) && defined(CHC_NO_SYNC)
+#  error "CHC_NO_ASYNC and CHC_NO_SYNC are mutually exclusive"
+#elif defined(CHC_NO_ASYNC)
+#  define CHC__IOLESS(in)    0
+#elif defined(CHC_NO_SYNC)
+#  define CHC__IOLESS(in)    1
+#else
+#  define CHC__IOLESS(in)    ((in)->io == NULL)
+#endif
+
 /* Public typedef in the declarations section; struct body is internal. */
 struct chc_in {
     chc_io          *io;        /* NULL => ioless  */
@@ -760,6 +776,7 @@ struct chc_in {
     size_t           mark;      /* rewind target; SIZE_MAX when unset */
 };
 
+#ifndef CHC_NO_SYNC
 int
 chc_in_init(chc_in *in, chc_io *io, const chc_alloc *al,
              size_t cap, chc_err *err)
@@ -777,7 +794,9 @@ chc_in_init(chc_in *in, chc_io *io, const chc_alloc *al,
     in->mark = SIZE_MAX;
     return CHC_OK;
 }
+#endif
 
+#ifndef CHC_NO_ASYNC
 int
 chc_in_init_ioless(chc_in *in, const chc_alloc *al)
 {
@@ -792,6 +811,7 @@ chc_in_init_ioless(chc_in *in, const chc_alloc *al)
     in->mark = SIZE_MAX;
     return CHC_OK;
 }
+#endif
 
 /* Drop prefix [0, keep): keep = mark when a checkpoint is live, else pos.
  * consumed counts returned bytes, not offsets, so compaction leaves it be;
@@ -886,7 +906,7 @@ static int
 chc__in_refill(chc_in *in, chc_err *err)
 {
     if (in->pos < in->fill) return CHC_OK;
-    if (in->io == NULL)
+    if (CHC__IOLESS(in))
         return chc__err_set(err, CHC_WOULD_BLOCK, "ioless buffer drained");
     if (in->eof) return chc__err_set(err, CHC_ERR_EOF, "unexpected eof");
 
@@ -939,7 +959,7 @@ chc__read_bytes(chc_in *in, void *dst, size_t n, chc_err *err)
      * (pos, fill, consumed) stay consistent. Disabled in ioless: bypassed
      * bytes land outside in->buf and can't be rewound, so ioless routes
      * everything through the (growable) staging buf. */
-    while (in->io != NULL && n > in->cap) {
+    while (!CHC__IOLESS(in) && n > in->cap) {
         if (in->eof)
             return chc__err_set(err, CHC_ERR_EOF, "short read");
         if (in->io->check_cancel && in->io->check_cancel(in->io->ud))
@@ -2592,7 +2612,7 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
                      const chc_block_opts *opts,
                      chc_block **blk, size_t *next_col, chc_err *err)
 {
-    bool ioless = in->io == NULL;
+    bool ioless = CHC__IOLESS(in);
     chc_block *b = *blk;
     int rc;
 
@@ -2759,11 +2779,14 @@ chc__block_read_in(chc_in *in, const chc_alloc *al,
      * must leave `in` exactly as found. Callers that own the packet-start
      * checkpoint/rewind (chc_block_read's io-backed in, the legacy ioless
      * driver) then see untouched mark/pos/consumed. */
+#ifndef CHC_NO_ASYNC
     size_t   entry_pos = in->pos, entry_mark = in->mark;
     uint64_t entry_consumed = in->consumed;
+#endif
     chc_block *blk = NULL;
     size_t next_col = 0;
     int rc = chc__block_resume_in(in, al, opts, &blk, &next_col, err);
+#ifndef CHC_NO_ASYNC
     /* io-backed callers never see WOULD_BLOCK; the compressed dec_in path may
      * (propagated from the underlying ioless raw in), in which case the async
      * recv driver rewinds the raw in to packet start -- baseline. */
@@ -2773,6 +2796,7 @@ chc__block_read_in(chc_in *in, const chc_alloc *al,
         in->mark = entry_mark;
         in->consumed = entry_consumed;
     }
+#endif
     *out = blk;
     return rc;
 }

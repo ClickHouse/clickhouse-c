@@ -24,6 +24,10 @@
 #ifndef CLICKHOUSE_ASYNC_H
 #define CLICKHOUSE_ASYNC_H
 
+#ifdef CHC_NO_ASYNC
+#  error "clickhouse-async.h needs the ioless reader; remove CHC_NO_ASYNC"
+#endif
+
 #include "clickhouse-client.h"      /* pulls clickhouse.h + clickhouse-compression.h */
 
 #ifdef __cplusplus
