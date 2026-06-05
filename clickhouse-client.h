@@ -234,15 +234,35 @@ struct chc_client {
      * leaving these at reset values across calls. */
     int              recv_in_block;  /* 0 = at packet boundary; 1 = mid block-bearing packet */
     chc_packet_kind  recv_kind;      /* committed kind for the in-progress block */
-    chc_block       *recv_partial;   /* retained partial block (uncompressed resume) */
+    chc_block       *recv_partial;   /* retained partial block */
     size_t           recv_next_col;  /* resume column index */
+
+    /* Compressed-block frame-granularity resume; lifecycle = one compressed block.
+     * recv_dec_in accumulates decompressed bytes the column reader has not yet consumed;
+     * recv_decomp decompresses one frame at a time from `in`.
+     * recv_partial / recv_next_col carry per-column progress over recv_dec_in. */
+    bool             recv_dec_active;
+    chc__decomp_src  recv_decomp;
+    chc_in           recv_dec_in;
 };
+
+/* Free the persisted compressed-resume decompressor + decompressed buffer.
+ * Idempotent; no-op when no compressed block is in flight. */
+static void
+chc__client_recv_comp_free(chc_client *c)
+{
+    if (!c->recv_dec_active) return;
+    chc__decomp_src_free(&c->recv_decomp);
+    chc_in_free(&c->recv_dec_in);
+    c->recv_dec_active = false;
+}
 
 /* Free retained recv-resume state. Safe at any packet boundary or teardown. */
 static void
 chc__client_recv_state_free(chc_client *c)
 {
     if (c->recv_partial) { chc_block_destroy(c->recv_partial, c->al); c->recv_partial = NULL; }
+    chc__client_recv_comp_free(c);
     c->recv_in_block = 0;
     c->recv_next_col = 0;
 }
@@ -694,12 +714,16 @@ chc__recv_skip_lead_string(chc_client *c, int gated, chc_err *err)
     return CHC_OK;
 }
 
-/* Read one compressed block body from c->in into *out. Baseline: build a
- * per-call decompressor + io-backed dec_in over the (possibly ioless) raw in
- * and run the block reader. ioless: checkpoint raw at block start so a mid-
- * decompress drain rewinds and re-decompresses from frame 0 on retry. Frame-
- * granularity resumption is future work; when it lands
- * it replaces this body with a persisted decomp + ioless dec_in pump loop. */
+/* Read one compressed block body from c->in into *out, io-backed
+ * path only. Build a per-call decompressor + io-backed dec_in over the raw in
+ * and run the block reader; io-backed refill blocks, so the block always
+ * completes in one call. The ioless path is handled by
+ * chc__recv_block_compressed_resume, which keeps decomp state alive across
+ * CHC_WOULD_BLOCK for frame-granularity resumption.
+ *
+ * The ioless checkpoint/rewind below is dead for the blocking caller; it stays
+ * to keep this function correct if ever driven over an ioless raw in (baseline
+ * rewind-to-block-start). */
 static int
 chc__recv_block_compressed(chc_client *c, const chc_block_opts *opts,
                            chc_block **out, chc_err *err)
@@ -722,6 +746,83 @@ chc__recv_block_compressed(chc_client *c, const chc_block_opts *opts,
     return rc;
 }
 
+/* Frame-granularity compressed resume for an ioless `in`. Keeps a
+ * persisted decompressor + ioless decompressed buffer (c->recv_decomp /
+ * c->recv_dec_in) alive across CHC_WOULD_BLOCK so a compressed Data block
+ * streamed over many reads re-decompresses at most one frame and re-parses at
+ * most one column on retry, instead of re-decompressing from frame 0.
+ *
+ * Demand-driven: pumps exactly one frame whenever the column reader underruns
+ * the decompressed buffer. A block's frames sum to exactly its serialized size
+ * and the next packet starts with an uncompressed tag, so chc__block_resume_in
+ * reports CHC_OK before it would ever demand a frame from the next packet --
+ * eager pumping would mis-read that tag as a frame and fail on a hash mismatch.
+ *
+ * Contract mirrors the uncompressed branch's chc__block_resume_in use:
+ *   CHC_OK          -- block complete in c->recv_partial (caller takes it);
+ *                      decomp state torn down.
+ *   CHC_WOULD_BLOCK -- raw `in` drained mid-frame; partial block + decomp state
+ *                      retained, raw rewound to the incomplete frame's start.
+ *   other           -- error; recv_partial freed/NULL, decomp state torn down. */
+static int
+chc__recv_block_compressed_resume(chc_client *c, const chc_block_opts *opts,
+                                  chc_err *err)
+{
+    if (!c->codec)
+        return chc__err_set(err, CHC_ERR_USAGE,
+                            "compression enabled but codec is NULL");
+
+    if (!c->recv_dec_active) {
+        int rc = chc_in_init_ioless(&c->recv_dec_in, c->al);
+        if (rc != CHC_OK) return rc;
+        chc_io scratch_io;  /* push mode: the decomp io adapter goes unused */
+        chc__decomp_src_init(&c->recv_decomp, &c->in, c->codec, c->al, &scratch_io);
+        c->recv_dec_active = true;
+    }
+
+    for (;;) {
+        /* Parse as far as the decompressed bytes allow (per-column retain is
+         * active: recv_dec_in is ioless). */
+        int rc = chc__block_resume_in(&c->recv_dec_in, c->al, opts,
+                                      &c->recv_partial, &c->recv_next_col, err);
+        if (rc == CHC_OK) {
+            chc__client_recv_comp_free(c);
+            return CHC_OK;
+        }
+        if (rc != CHC_WOULD_BLOCK) {            /* real error: resume freed the block */
+            chc__client_recv_comp_free(c);
+            c->recv_partial = NULL;
+            c->recv_next_col = 0;
+            return rc;
+        }
+
+        /* recv_dec_in drained mid-block: decompress exactly ONE more frame from
+         * the raw compressed `in` and push it into recv_dec_in. */
+        chc__in_checkpoint(&c->in);             /* frame start on raw */
+        int frc = chc__decomp_read_frame(&c->recv_decomp, err);
+        if (frc == CHC_WOULD_BLOCK) {           /* frame incomplete: need socket bytes */
+            chc__in_rewind(&c->in);             /* keep partial frame buffered */
+            return CHC_WOULD_BLOCK;
+        }
+        if (frc != CHC_OK) {                     /* hash mismatch / codec / oom */
+            chc__client_recv_comp_free(c);
+            if (c->recv_partial) { chc_block_destroy(c->recv_partial, c->al); c->recv_partial = NULL; }
+            c->recv_next_col = 0;
+            return frc;
+        }
+        /* Complete frame committed (no rewind); push its decompressed bytes.
+         * chc_in_submit copies, so the next frame may reuse frame_buf. */
+        rc = chc_in_submit(&c->recv_dec_in, c->recv_decomp.frame_buf,
+                           c->recv_decomp.frame_fill, err);
+        if (rc != CHC_OK) {
+            chc__client_recv_comp_free(c);
+            if (c->recv_partial) { chc_block_destroy(c->recv_partial, c->al); c->recv_partial = NULL; }
+            c->recv_next_col = 0;
+            return rc;
+        }
+    }
+}
+
 /* Resumable packet decoder shared by chc_client_recv_packet and
  * chc_async_recv_packet. For io-backed `in` refill blocks inside the reader.
  * Ioless-gated checkpoints/resets are skipped, and a packet always completes
@@ -731,7 +832,9 @@ chc__recv_block_compressed(chc_client *c, const chc_block_opts *opts,
  *
  * recv keeps parse state alive across CHC_WOULD_BLOCK: a Data block streamed
  * over many reads resumes at the in-progress column (uncompressed, via
- * chc__block_resume_in); compressed Data uses rewind-to-block-start. */
+ * chc__block_resume_in). Compressed Data resumes at frame granularity over an
+ * ioless `in` (chc__recv_block_compressed_resume); the blocking io-backed path
+ * rebuilds the decompressor per call (chc__recv_block_compressed). */
 static int
 chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
 {
@@ -852,11 +955,25 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
         return CHC_OK;
     }
 
+    /* Compressed Data. ioless: frame-granularity resume over a persisted
+     * decompressor + ioless decompressed buffer. io-backed:
+     * baseline rebuild-per-call (chc__recv_block_compressed). */
+    if (ioless) {
+        rc = chc__recv_block_compressed_resume(c, &opts, err);
+        if (rc == CHC_WOULD_BLOCK) return rc;  /* partial block + decomp state retained */
+        c->recv_in_block = 0;
+        if (rc != CHC_OK) return rc;           /* resume tore down its state + recv_partial */
+        out->block = c->recv_partial;
+        c->recv_partial = NULL;
+        c->recv_next_col = 0;
+        chc_in_reset(&c->in);
+        return CHC_OK;
+    }
+
     rc = chc__recv_block_compressed(c, &opts, &out->block, err);
     if (rc == CHC_WOULD_BLOCK) return rc;
     c->recv_in_block = 0;
     if (rc != CHC_OK) return rc;
-    if (ioless) chc_in_reset(&c->in);
     return CHC_OK;
 
 control_done:

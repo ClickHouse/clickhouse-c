@@ -17,7 +17,8 @@
  * recv keeps parser state alive across CHC_WOULD_BLOCK (in cli.recv_*): a Data
  * block streamed over many reads resumes at the in-progress column rather than
  * re-parsing from scratch (uncompressed path, via chc__block_resume_in).
- * Compressed Data uses the baseline rewind-to-block-start strategy.
+ * Compressed Data resumes at frame granularity: at most one frame is
+ * re-decompressed and one column re-parsed on retry.
  */
 
 #ifndef CLICKHOUSE_ASYNC_H
