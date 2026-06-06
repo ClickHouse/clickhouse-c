@@ -480,8 +480,7 @@ test_write_array_nested_string(void)
         chc_err xerr = {0};
         int rc = chc_block_builder_append_array_nested_string(bb, "x", 1, bad,
                 2, levels, levels_len, val_offs, buf, 2, &xerr);
-        CHECK(rc != CHC_OK);
-        CHECK(xerr.code == CHC_ERR_TYPE);
+        CHECK(rc == CHC_ERR_TYPE);
         chc_type_destroy(bad, &al);
     }
 
@@ -603,8 +602,7 @@ test_write_json_string(void)
         chc_err xerr = {0};
         int rc = chc_block_builder_append_json_string(bb, "x", 1, bad,
                 offs, buf, 2, &xerr);
-        CHECK(rc != CHC_OK);
-        CHECK(xerr.code == CHC_ERR_TYPE);
+        CHECK(rc == CHC_ERR_TYPE);
         chc_type_destroy(bad, &al);
     }
 

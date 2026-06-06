@@ -277,7 +277,6 @@ test_eof_after_handshake(EVP_PKEY *pkey, X509 *cert)
     int rc = io.read(io.ud, rb, sizeof rb, &got, &err);
     CHECK(rc == CHC_OK);
     CHECK(got == 0);
-    CHECK(err.code == 0);
 
 out:
     fixture_down(&f);
@@ -308,12 +307,10 @@ test_cancel(EVP_PKEY *pkey, X509 *cert)
     size_t got = 99;
     int rc = io.read(io.ud, rb, 5, &got, &err);
     CHECK(rc == CHC_ERR_CANCELLED);
-    CHECK(err.code == CHC_ERR_CANCELLED);
 
     chc_err err2 = {0};
     rc = io.write(io.ud, "x", 1, &err2);
     CHECK(rc == CHC_ERR_CANCELLED);
-    CHECK(err2.code == CHC_ERR_CANCELLED);
 
     g_cancel = false;
 

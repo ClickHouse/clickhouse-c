@@ -80,10 +80,8 @@ chc__posix_read(void *ud, void *buf, size_t len, size_t *out_n, chc_err *err)
         ssize_t n = read(s->fd, buf, len);
         if (n >= 0) { *out_n = (size_t) n; return CHC_OK; }
         if (errno == EINTR) continue;
-        snprintf(err->msg, sizeof err->msg, "read(fd=%d): %s",
-                 s->fd, strerror(errno));
-        err->code = CHC_ERR_IO;
-        return CHC_ERR_IO;
+        return chc__err_set(err, CHC_ERR_IO, "read(fd=%d): %s",
+                            s->fd, strerror(errno));
     }
 }
 
@@ -96,10 +94,8 @@ chc__posix_write(void *ud, const void *buf, size_t len, chc_err *err)
         ssize_t n = write(s->fd, p, len);
         if (n > 0) { p += n; len -= (size_t) n; continue; }
         if (n < 0 && errno == EINTR) continue;
-        snprintf(err->msg, sizeof err->msg, "write(fd=%d): %s",
-                 s->fd, strerror(errno));
-        err->code = CHC_ERR_IO;
-        return CHC_ERR_IO;
+        return chc__err_set(err, CHC_ERR_IO, "write(fd=%d): %s",
+                            s->fd, strerror(errno));
     }
     return CHC_OK;
 }
