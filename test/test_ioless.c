@@ -90,7 +90,6 @@ test_ioless_basic(void)
     uint8_t b = 0;
     int rc = chc__read_byte(&in, &b, &err);
     CHECK(rc == CHC_WOULD_BLOCK);
-    CHECK(err.code == CHC_WOULD_BLOCK);             /* rides err->code */
     CHECK_EQ_U64(chc_in_available(&in), 0);
 
     chc_err_reset(&err);
@@ -277,9 +276,9 @@ test_golden_chunk(void)
 /* The compressed Data path wraps the ioless raw chc_in in a nested
  * io-backed dec_in (over chc__decomp_io_read). This is the layer where a
  * CHC_WOULD_BLOCK could be reclassified as CHC_ERR_IO: dec_in's refill (and
- * its read_bytes bypass) remap a non-OK underlying read unless err->code is
- * already set. The phase-1 feed source sets err->code = CHC_WOULD_BLOCK, so
- * it must survive. This test proves it end-to-end, multi-frame. */
+ * its read_bytes bypass) return the underlying read's status verbatim, so
+ * the CHC_WOULD_BLOCK the phase-1 feed source raises propagates intact
+ * rather than being flattened. This test proves it end-to-end, multi-frame. */
 
 static uint8_t *
 build_compressed_block(const chc_alloc *al, const chc_block_opts *opts,

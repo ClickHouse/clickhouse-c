@@ -102,7 +102,6 @@ enum {
 #endif
 
 typedef struct chc_err {
-    int  code;
     int  server_code;
     char msg[CHC_ERR_MSG_LEN];
     char server_name[64];
@@ -110,7 +109,6 @@ typedef struct chc_err {
 
 static inline void chc_err_reset(chc_err *e) {
     if (!e) return;
-    e->code = 0;
     e->server_code = 0;
     e->msg[0] = '\0';
     e->server_name[0] = '\0';
@@ -594,7 +592,6 @@ static int CHC__PRINTF_FMT(3, 4)
 chc__err_set(chc_err *e, int code, const char *fmt, ...)
 {
     if (!e) return code;
-    e->code = code;
     if (fmt) {
         va_list ap;
         __builtin_va_start(ap, fmt);
@@ -918,8 +915,8 @@ chc__in_refill(chc_in *in, chc_err *err)
     size_t got = 0;
     int rc = in->io->read(in->io->ud, in->buf, in->cap, &got, err);
     if (rc != CHC_OK) {
-        if (err && err->code == 0) chc__err_set(err, CHC_ERR_IO, "read failed");
-        return err && err->code ? err->code : CHC_ERR_IO;
+        if (err && err->msg[0] == '\0') chc__err_set(err, rc, "read failed");
+        return rc;
     }
     if (got == 0) { in->eof = true; return chc__err_set(err, CHC_ERR_EOF, "unexpected eof"); }
     in->fill = got;
@@ -967,8 +964,8 @@ chc__read_bytes(chc_in *in, void *dst, size_t n, chc_err *err)
         size_t got = 0;
         int rc = in->io->read(in->io->ud, p, n, &got, err);
         if (rc != CHC_OK) {
-            if (err && err->code == 0) chc__err_set(err, CHC_ERR_IO, "read failed");
-            return err && err->code ? err->code : CHC_ERR_IO;
+            if (err && err->msg[0] == '\0') chc__err_set(err, rc, "read failed");
+            return rc;
         }
         if (got == 0) {
             in->eof = true;
