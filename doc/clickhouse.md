@@ -24,8 +24,7 @@ enum {
 };
 
 typedef struct chc_err {
-    int  code;                       /* 0 on success, CHC_ERR_* otherwise */
-    int  server_code;                /* set when code == CHC_ERR_SERVER */
+    int  server_code;                /* set when the return code is CHC_ERR_SERVER */
     char msg[CHC_ERR_MSG_LEN];       /* default 256, NUL-terminated, snprintf-truncated */
     char server_name[64];            /* CH exception class, if SERVER */
 } chc_err;
@@ -118,6 +117,13 @@ never touch it; it is public for ioless drivers that submit bytes. Two modes:
 tail; call it only at a packet boundary, never mid-parse. `chc_in_available`
 reports bytes submitted but not yet consumed. `chc_in_free` releases the
 buffer.
+
+Mode is chosen at runtime per `in` (presence of a `chc_io`). To pin it at
+compile time and let the dead branch fold away, define exactly one of
+`CHC_NO_ASYNC` (io-backed only; drops `chc_in_init_ioless`) or `CHC_NO_SYNC`
+(ioless only; drops `chc_in_init`) before the implementation include. Defining
+both is a compile error; `clickhouse-async.h` requires the ioless reader and
+rejects `CHC_NO_ASYNC`.
 
 The ioless mode is the foundation of [clickhouse-async.h](clickhouse-async.md):
 the parser checkpoints at packet boundaries and rewinds on `CHC_WOULD_BLOCK`, so
