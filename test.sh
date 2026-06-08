@@ -31,6 +31,8 @@ run_one() {
     [[ $name == client_tcp ]] && libs+=(-llz4 -lzstd)
     [[ $name == ioless ]] && libs+=(-llz4)
     [[ $name == async_compressed ]] && libs+=(-llz4)
+    [[ $name == compress_no_sync ]] && libs+=(-llz4)
+    [[ $name == compress_no_async ]] && libs+=(-llz4)
     [[ $name == openssl_io ]] && libs+=(-lssl -lcrypto -lpthread)
     # async_uring: enable real body when liburing available, else skip stub
     if [[ $name == async_uring && $uring == 1 ]]; then
