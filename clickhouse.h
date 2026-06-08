@@ -779,7 +779,6 @@ struct chc_in {
     size_t           mark;      /* rewind target; SIZE_MAX when unset */
 };
 
-#ifndef CHC_NO_SYNC
 int
 chc_in_init(chc_in *in, chc_io *io, const chc_alloc *al,
              size_t cap, chc_err *err)
@@ -797,9 +796,7 @@ chc_in_init(chc_in *in, chc_io *io, const chc_alloc *al,
     in->mark = SIZE_MAX;
     return CHC_OK;
 }
-#endif
 
-#ifndef CHC_NO_ASYNC
 int
 chc_in_init_ioless(chc_in *in, const chc_alloc *al)
 {
@@ -814,7 +811,6 @@ chc_in_init_ioless(chc_in *in, const chc_alloc *al)
     in->mark = SIZE_MAX;
     return CHC_OK;
 }
-#endif
 
 /* Drop prefix [0, keep): keep = mark when a checkpoint is live, else pos.
  * consumed counts returned bytes, not offsets, so compaction leaves it be;

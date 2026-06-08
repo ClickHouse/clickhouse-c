@@ -255,7 +255,7 @@ chc_async_handshake(chc_async_client *c, chc_err *err)
             continue;
 
         case CHC__HS_RECV_PONG:
-            rc = chc__recv_pong(cli, err);  /* owns checkpoint/rewind (ioless) */
+            rc = chc__recv_pong(cli, err);  /* owns checkpoint/rewind */
             if (rc != CHC_OK) return rc;
             chc_in_reset(&cli->in);
             c->hs_phase = CHC__HS_DONE;
