@@ -151,13 +151,9 @@ typedef struct chc_io {
  *    in-progress parse to be retried once more bytes arrive. */
 typedef struct chc_in chc_in;
 
-#ifndef CHC_NO_SYNC
 CHC_NODISCARD int    chc_in_init(chc_in *in, chc_io *io, const chc_alloc *al,
                                  size_t cap, chc_err *err);
-#endif
-#ifndef CHC_NO_ASYNC
 CHC_NODISCARD int    chc_in_init_ioless(chc_in *in, const chc_alloc *al);
-#endif
 CHC_NODISCARD int    chc_in_submit(chc_in *in, const void *buf, size_t len,
                                  chc_err *err);
 size_t               chc_in_available(const chc_in *in); /* unconsumed bytes */
