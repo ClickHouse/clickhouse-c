@@ -835,6 +835,66 @@ static void test_qbit_parse(void) {
     }
 }
 
+/* Parser-only: numeric type parameters are range-checked, oversized digit
+ * runs rejected before int64 accumulation can overflow (signed overflow UB
+ * pre-fix, eg FixedString(99999999999999999999)). */
+static void test_type_parse_numeric_bounds(void) {
+    current_test = "type_parse_numeric_bounds";
+    chc_alloc al = chc_alloc_stdlib();
+
+    const char *ok[] = {
+        "FixedString(16777215)",                  /* CHC_MAX_FIXEDSTRING_SIZE */
+        "Enum8('a' = -128, 'b' = 127)",
+        "Enum16('a' = -32768, 'b' = 32767)",
+        "Decimal(76, 76)",
+        "Decimal64(18)",
+        "DateTime64(0)",
+        "DateTime64(9)",
+    };
+    for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++) {
+        chc_type *t = NULL; chc_err err = {};
+        int rc = chc_type_parse(ok[i], strlen(ok[i]), &al, &t, &err);
+        if (rc != CHC_OK) {
+            fprintf(stderr, "%s: parse '%s' failed: %s\n",
+                    current_test, ok[i], err.msg);
+            fail_count++; continue;
+        }
+        chc_type_destroy(t, &al);
+    }
+
+    const char *bad[] = {
+        "FixedString(99999999999999999999)",      /* > INT64_MAX */
+        "FixedString(9223372036854775808)",       /* INT64_MAX + 1 */
+        "FixedString(-9223372036854775809)",      /* INT64_MIN - 1 */
+        "FixedString(-)",                         /* lone minus lexes as NUMBER */
+        "FixedString(16777216)",                  /* max + 1 */
+        "Enum8('a' = 128)",
+        "Enum8('a' = -129)",
+        "Enum16('a' = 32768)",
+        "Enum16('a' = -99999999999999999999)",
+        "Decimal(0, 0)",
+        "Decimal(77, 0)",
+        "Decimal(10, 11)",                        /* scale > precision */
+        "Decimal(99999999999999999999, 0)",
+        "Decimal32(10)",
+        "Decimal64(-1)",
+        "DateTime64(10)",
+        "DateTime64(99999999999999999999)",
+        "Time64(10)",
+        "QBit(Float32, 99999999999999999999)",
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        chc_type *t = NULL; chc_err err = {};
+        int rc = chc_type_parse(bad[i], strlen(bad[i]), &al, &t, &err);
+        if (rc != CHC_ERR_TYPE) {
+            fprintf(stderr, "%s: '%s' rc=%d, want CHC_ERR_TYPE\n",
+                    current_test, bad[i], rc);
+            fail_count++;
+        }
+        if (rc == CHC_OK) chc_type_destroy(t, &al);
+    }
+}
+
 /* Crafted-bytes decode. The Native wire form of QBit(T, N) is
  * Tuple(FixedString(ceil(N/8)) x bits) with the MSB bit-plane first;
  * the decoder must hand back exactly those planes. */
@@ -954,6 +1014,7 @@ int main(void) {
     test_column_validate();
     test_invalid_array_overflow();
     test_qbit_parse();
+    test_type_parse_numeric_bounds();
     test_qbit_decode();
 
     if (fail_count) {

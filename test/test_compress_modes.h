@@ -271,10 +271,82 @@ test_compressed_recv(void)
     test_free_blocks(ref, N_DATA, &al);
 }
 
+/* Hostile frame: LZ4 original size above INT_MAX must be rejected at the
+ * frame header, before checksum verify, output allocation, or codec call.
+ * Boundary companion at exactly INT_MAX passes the size domain and dies on
+ * checksum instead. */
+static long g_hostile_decomp_calls;
+
+static int
+hostile_lz4_decompress(void *ud, const void *src, size_t src_len,
+                       void *dst, size_t original, chc_err *err)
+{
+    (void) ud; (void) src; (void) src_len; (void) dst; (void) original;
+    g_hostile_decomp_calls++;
+    return chc__err_set(err, CHC_ERR_USAGE, "codec must not be reached");
+}
+
+static int
+hostile_frame_read(const uint8_t *frame, size_t len, const chc_alloc *al,
+                   chc_err *err)
+{
+    chc_in in;
+#ifdef CHC_NO_SYNC
+    if (chc_in_init_ioless(&in, al)) return -1;
+    if (chc_in_submit(&in, frame, len, err)) { chc_in_free(&in); return -1; }
+#else
+    test_mem_src m;
+    chc_io io;
+    test_mem_src_init(&m, &io, frame, len);
+    if (chc_in_init(&in, &io, al, 0, err)) return -1;
+#endif
+    chc_codec codec = {};
+    codec.lz4_decompress = hostile_lz4_decompress;
+
+    chc__decomp_src ds;
+    chc_io dio;
+    chc__decomp_src_init(&ds, &in, &codec, al, &dio);
+    uint8_t sink[8];
+    size_t got = 0;
+    int rc = dio.read(dio.ud, sink, sizeof sink, &got, err);
+    chc__decomp_src_free(&ds);
+    chc_in_free(&in);
+    return rc;
+}
+
+static void
+test_lz4_orig_over_int_max(void)
+{
+    current_test = "lz4_orig_over_int_max[" MODE_NAME "]";
+    chc_alloc al = chc_alloc_stdlib();
+
+    /* 16B checksum (zeros) + method + comp_with_hdr=9 + orig, no payload. */
+    uint8_t frame[16 + CHC__COMP_HEADER_BYTES] = {};
+    frame[16] = CHC__COMP_LZ4;
+    frame[17] = CHC__COMP_HEADER_BYTES;
+    frame[24] = 0x80;                     /* orig = 0x80000000 = INT_MAX+1 */
+
+    chc_err err = {};
+    g_hostile_decomp_calls = 0;
+    int rc = hostile_frame_read(frame, sizeof frame, &al, &err);
+    CHECK(rc == CHC_ERR_PROTOCOL);
+    CHECK(strstr(err.msg, "original size") != NULL);
+    CHECK_EQ_I64(g_hostile_decomp_calls, 0);
+
+    frame[21] = frame[22] = frame[23] = 0xff;
+    frame[24] = 0x7f;                     /* orig = INT_MAX: in domain */
+    chc_err err2 = {};
+    rc = hostile_frame_read(frame, sizeof frame, &al, &err2);
+    CHECK(rc == CHC_ERR_PROTOCOL);
+    CHECK(strstr(err2.msg, "hash mismatch") != NULL);
+    CHECK_EQ_I64(g_hostile_decomp_calls, 0);
+}
+
 int
 main(void)
 {
     test_compressed_recv();
+    test_lz4_orig_over_int_max();
 
     if (fail_count) {
         fprintf(stderr, "%d check(s) failed\n", fail_count);

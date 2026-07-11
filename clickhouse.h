@@ -1276,15 +1276,20 @@ chc__eat_tok(chc__lex *lx)
     return t;
 }
 
-static int64_t
-chc__atoi64(const char *s, size_t n)
+static bool
+chc__atoi64(const char *s, size_t n, int64_t *out)
 {
-    int64_t v = 0;
-    bool neg = false;
-    size_t i = 0;
-    if (n && s[0] == '-') { neg = true; i = 1; }
-    for (; i < n; i++) v = v * 10 + (s[i] - '0');
-    return neg ? -v : v;
+    bool neg = n && *s == '-';
+    if (neg) { s++; n--; }
+    if (!n) return false;
+    uint64_t v = 0, lim = (uint64_t) INT64_MAX + neg;
+    while (n--) {
+        uint64_t d = (uint64_t) (*s++ - '0');
+        if (v > (lim - d) / 10) return false;
+        v = v * 10 + d;
+    }
+    *out = neg ? (v == lim ? INT64_MIN : -(int64_t) v) : (int64_t) v;
+    return true;
 }
 
 /* AUTO-GENERATED-NAME-TABLE-BEGIN -- regenerate via tools/regen_name_table.sh */
@@ -1660,8 +1665,16 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                     chc_type_destroy(t, al);
                     return chc__err_set(err, CHC_ERR_TYPE, "Enum: expected value");
                 }
-                int rc = chc__type_push_enum(al, t, s.start, s.len,
-                                             chc__atoi64(num.start, num.len), err);
+                int64_t ev;
+                int64_t lo = t->kind == CHC_ENUM8 ? INT8_MIN : INT16_MIN;
+                int64_t hi = t->kind == CHC_ENUM8 ? INT8_MAX : INT16_MAX;
+                if (!chc__atoi64(num.start, num.len, &ev) || ev < lo || ev > hi) {
+                    chc_type_destroy(t, al);
+                    return chc__err_set(err, CHC_ERR_TYPE,
+                        "Enum: value out of range: %.*s",
+                        (int) num.len, num.start);
+                }
+                int rc = chc__type_push_enum(al, t, s.start, s.len, ev, err);
                 if (rc != CHC_OK) { chc_type_destroy(t, al); return rc; }
                 if (chc__peek_tok(lx).kind == CHC__TOK_COMMA) chc__eat_tok(lx);
             }
@@ -1671,11 +1684,13 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE, "FixedString: expected N");
             }
-            int64_t n = chc__atoi64(num.start, num.len);
-            if (n <= 0 || (uint64_t) n > CHC_MAX_FIXEDSTRING_SIZE) {
+            int64_t n;
+            if (!chc__atoi64(num.start, num.len, &n)
+                || n <= 0 || (uint64_t) n > CHC_MAX_FIXEDSTRING_SIZE) {
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE,
-                    "FixedString: N out of range: %lld", (long long) n);
+                    "FixedString: N out of range: %.*s",
+                    (int) num.len, num.start);
             }
             t->fixed_string.n = (int) n;
         } else if (decimal_alias) {
@@ -1694,9 +1709,17 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE, "Decimal: expected scale");
             }
-            int prec = (int) chc__atoi64(np.start, np.len);
-            t->decimal.precision = prec;
-            t->decimal.scale = (int) chc__atoi64(ns.start, ns.len);
+            int64_t prec, scale;
+            if (!chc__atoi64(np.start, np.len, &prec)
+                || !chc__atoi64(ns.start, ns.len, &scale)
+                || prec < 1 || prec > 76 || scale < 0 || scale > prec) {
+                chc_type_destroy(t, al);
+                return chc__err_set(err, CHC_ERR_TYPE,
+                    "Decimal: precision or scale out of range: %.*s, %.*s",
+                    (int) np.len, np.start, (int) ns.len, ns.start);
+            }
+            t->decimal.precision = (int) prec;
+            t->decimal.scale = (int) scale;
             if      (prec <=  9) t->kind = CHC_DECIMAL32;
             else if (prec <= 18) t->kind = CHC_DECIMAL64;
             else if (prec <= 38) t->kind = CHC_DECIMAL128;
@@ -1708,14 +1731,30 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE, "Decimal: expected scale");
             }
-            t->decimal.scale = (int) chc__atoi64(num.start, num.len);
+            int64_t scale;
+            if (!chc__atoi64(num.start, num.len, &scale)
+                || scale < 0 || scale > chc_type_decimal_precision(t)) {
+                chc_type_destroy(t, al);
+                return chc__err_set(err, CHC_ERR_TYPE,
+                    "Decimal: scale out of range: %.*s",
+                    (int) num.len, num.start);
+            }
+            t->decimal.scale = (int) scale;
         } else if (t->kind == CHC_DATETIME64 || t->kind == CHC_TIME64) {
             chc__tok num = chc__eat_tok(lx);
             if (num.kind != CHC__TOK_NUMBER) {
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE, "DateTime64: expected precision");
             }
-            t->temporal.scale = (int) chc__atoi64(num.start, num.len);
+            int64_t scale;
+            if (!chc__atoi64(num.start, num.len, &scale)
+                || scale < 0 || scale > 9) {
+                chc_type_destroy(t, al);
+                return chc__err_set(err, CHC_ERR_TYPE,
+                    "DateTime64: precision out of range: %.*s",
+                    (int) num.len, num.start);
+            }
+            t->temporal.scale = (int) scale;
             if (chc__peek_tok(lx).kind == CHC__TOK_COMMA) {
                 chc__eat_tok(lx);
                 chc__tok s = chc__eat_tok(lx);
@@ -1771,12 +1810,14 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE, "QBit: expected dimension");
             }
-            int64_t n = chc__atoi64(num.start, num.len);
+            int64_t n;
             /* Nested FixedString width is ceil(N/8); bound it as FixedString is. */
-            if (n <= 0 || ((uint64_t) n + 7) / 8 > CHC_MAX_FIXEDSTRING_SIZE) {
+            if (!chc__atoi64(num.start, num.len, &n)
+                || n <= 0 || ((uint64_t) n + 7) / 8 > CHC_MAX_FIXEDSTRING_SIZE) {
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE,
-                    "QBit: dimension out of range: %lld", (long long) n);
+                    "QBit: dimension out of range: %.*s",
+                    (int) num.len, num.start);
             }
             t->qbit.dimension = (size_t) n;
         } else {
@@ -2312,10 +2353,14 @@ chc__col_read(chc_in *in, const chc_type *t,
         c->n_rows = n_rows;
         uint64_t total = 0;
         if (n_rows) {
-            c->array.offsets = chc__alloc(al, n_rows * sizeof(uint64_t), err);
+            size_t offs_bytes;
+            if (chc__mul_size(n_rows, sizeof(uint64_t), &offs_bytes)) {
+                chc__column_destroy(c, al);
+                return chc__err_set(err, CHC_ERR_PROTOCOL, "array offsets size overflow");
+            }
+            c->array.offsets = chc__alloc(al, offs_bytes, err);
             if (!c->array.offsets) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
-            int rc = chc__read_bytes(in, c->array.offsets,
-                                     n_rows * sizeof(uint64_t), err);
+            int rc = chc__read_bytes(in, c->array.offsets, offs_bytes, err);
             if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
             chc__swap_offsets(c->array.offsets, n_rows);
             total = c->array.offsets[n_rows - 1];
@@ -2491,9 +2536,14 @@ chc__col_read(chc_in *in, const chc_type *t,
                 "LowCardinality: key_rows %llu != block rows %zu",
                 (unsigned long long) key_rows, n_rows);
         }
-        c->lc.keys = chc__alloc(al, n_rows * c->lc.key_size, err);
+        size_t keys_bytes;
+        if (chc__mul_size(n_rows, c->lc.key_size, &keys_bytes)) {
+            chc__column_destroy(c, al);
+            return chc__err_set(err, CHC_ERR_PROTOCOL, "LowCardinality keys size overflow");
+        }
+        c->lc.keys = chc__alloc(al, keys_bytes, err);
         if (!c->lc.keys) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
-        rc = chc__read_bytes(in, c->lc.keys, n_rows * c->lc.key_size, err);
+        rc = chc__read_bytes(in, c->lc.keys, keys_bytes, err);
         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
         chc__swap_keys(c->lc.keys, n_rows, c->lc.key_size);
 
@@ -2572,10 +2622,14 @@ chc__col_read_geo(chc_in *in, int depth, size_t n_rows,
     c->n_rows = n_rows;
     uint64_t total = 0;
     if (n_rows) {
-        c->array.offsets = chc__alloc(al, n_rows * sizeof(uint64_t), err);
+        size_t offs_bytes;
+        if (chc__mul_size(n_rows, sizeof(uint64_t), &offs_bytes)) {
+            chc__column_destroy(c, al);
+            return chc__err_set(err, CHC_ERR_PROTOCOL, "array offsets size overflow");
+        }
+        c->array.offsets = chc__alloc(al, offs_bytes, err);
         if (!c->array.offsets) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
-        int rc = chc__read_bytes(in, c->array.offsets,
-                                 n_rows * sizeof(uint64_t), err);
+        int rc = chc__read_bytes(in, c->array.offsets, offs_bytes, err);
         if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
         chc__swap_offsets(c->array.offsets, n_rows);
         total = c->array.offsets[n_rows - 1];
