@@ -48,7 +48,7 @@ decode_ioless(const uint8_t *bytes, size_t len, size_t chunk, const chc_alloc *a
         for (;;) {
             chc__in_checkpoint(&in);
             chc_err e = {};
-            int rc = chc__block_read_in(&in, al, opts, &b, &e);
+            int rc = chc_block_read(&in, al, opts, &b, &e);
             if (rc == CHC_OK && b) break;
             if (rc == CHC_WOULD_BLOCK) {
                 chc__in_rewind(&in);
@@ -323,7 +323,7 @@ decode_io_comp(const uint8_t *bytes, size_t len, const chc_codec *codec,
     if (chc_in_init(&dec, &dio, al, 0, err)) {
         chc__decomp_src_free(&src); chc_in_free(&raw); return -1;
     }
-    int rc = chc__block_read_in(&dec, al, opts, out, err);
+    int rc = chc_block_read(&dec, al, opts, out, err);
     *consumed = raw.consumed;
     chc_in_free(&dec);
     chc__decomp_src_free(&src);
@@ -352,7 +352,7 @@ decode_ioless_comp(const uint8_t *bytes, size_t len, size_t chunk,
         if (chc_in_init(&dec, &dio, al, 0, &e)) {
             chc__decomp_src_free(&src); *err = e; chc_in_free(&raw); return -1;
         }
-        int rc = chc__block_read_in(&dec, al, opts, &b, &e);
+        int rc = chc_block_read(&dec, al, opts, &b, &e);
         chc_in_free(&dec);
         chc__decomp_src_free(&src);
         if (rc == CHC_OK && b) break;

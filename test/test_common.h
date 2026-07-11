@@ -113,6 +113,20 @@ test_mem_src_init(test_mem_src *src, chc_io *io, const void *data, size_t len)
     io->check_cancel = NULL;
 }
 
+/* Read one block via a throwaway chc_in over io -- for single-block sources.
+ * Streaming callers own a persistent chc_in and call chc_block_read directly. */
+CHC_MAYBE_UNUSED static int
+test_block_read_io(chc_io *io, const chc_alloc *al, const chc_block_opts *opts,
+                   chc_block **out, chc_err *err)
+{
+    chc_in in;
+    int rc = chc_in_init(&in, io, al, opts->read_buffer_bytes, err);
+    if (rc != CHC_OK) return rc;
+    rc = chc_block_read(&in, al, opts, out, err);
+    chc_in_free(&in);
+    return rc;
+}
+
 CHC_MAYBE_UNUSED static int
 test_mem_sink_write(void *ud, const void *buf, size_t n, chc_err *err)
 {

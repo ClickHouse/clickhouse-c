@@ -315,9 +315,11 @@ typedef struct chc_block_opts {
     size_t read_buffer_bytes;
 } chc_block_opts;
 
-/* Read one block. On clean EOF at a block boundary (no bytes consumed),
- * returns 0 with *out = NULL. On error returns CHC_ERR_* and fills err. */
-CHC_NODISCARD int  chc_block_read(chc_io *io, const chc_alloc *al,
+/* Read one block from a caller-owned chc_in. Reuse one chc_in (chc_in_init /
+ * chc_in_free) across calls to stream successive blocks: bytes read past the
+ * block boundary stay buffered for the next call. NULL opts means empty opts.
+ * Return 0 with *out = NULL at clean EOF, or CHC_ERR_* on error. */
+CHC_NODISCARD int  chc_block_read(chc_in *in, const chc_alloc *al,
                     const chc_block_opts *opts,
                     chc_block **out, chc_err *err);
 
@@ -2872,20 +2874,22 @@ header_fail:
     return rc;
 }
 
-/* Block read using an already-initialised chc_in. Used by chc_block_read
- * (one-shot) and by clickhouse-client.h's recv_packet (persistent buffer).
- * Thin non-looping wrapper over chc__block_resume_in. Returns 0 with
- * *out == NULL on clean EOF at block boundary (only when opts->has_block_info
- * is false; TCP path has no clean-EOF concept). */
-static int
-chc__block_read_in(chc_in *in, const chc_alloc *al,
-                   const chc_block_opts *opts, chc_block **out, chc_err *err)
+/* Block read from an already-initialised chc_in. Also used by
+ * clickhouse-client.h's recv_packet (persistent buffer). Thin non-looping
+ * wrapper over chc__block_resume_in. Returns 0 with *out == NULL on clean EOF
+ * at block boundary (only when opts->has_block_info is false; TCP path has no
+ * clean-EOF concept). */
+int
+chc_block_read(chc_in *in, const chc_alloc *al,
+               const chc_block_opts *opts, chc_block **out, chc_err *err)
 {
+    chc_block_opts def = {};
+    if (!opts) opts = &def;
     /* Snapshot to roll back resume's per-column checkpoint progress: this
      * non-resuming entry is baseline (rewind to packet start), so a would-block
      * must leave `in` exactly as found. Callers that own the packet-start
-     * checkpoint/rewind (chc_block_read's io-backed in, the legacy ioless
-     * driver) then see untouched mark/pos/consumed. */
+     * checkpoint/rewind (io-backed in, the legacy ioless driver) then see
+     * untouched mark/pos/consumed. */
 #ifndef CHC_NO_ASYNC
     size_t   entry_pos = in->pos, entry_mark = in->mark;
     uint64_t entry_consumed = in->consumed;
@@ -2905,21 +2909,6 @@ chc__block_read_in(chc_in *in, const chc_alloc *al,
     }
 #endif
     *out = blk;
-    return rc;
-}
-
-int
-chc_block_read(chc_io *io, const chc_alloc *al,
-               const chc_block_opts *opts,
-               chc_block **out, chc_err *err)
-{
-    chc_block_opts def = {};
-    if (!opts) opts = &def;
-    chc_in in;
-    int rc = chc_in_init(&in, io, al, opts->read_buffer_bytes, err);
-    if (rc != CHC_OK) return rc;
-    rc = chc__block_read_in(&in, al, opts, out, err);
-    chc_in_free(&in);
     return rc;
 }
 

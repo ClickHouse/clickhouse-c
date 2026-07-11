@@ -66,7 +66,7 @@ read_one_block(const char *query)
     chc_block *b = NULL;
     chc_block_opts opts = {};
     chc_err err = {};
-    int rc = chc_block_read(&io, &al, &opts, &b, &err);
+    int rc = test_block_read_io(&io, &al, &opts, &b, &err);
     if (rc < 0) {
         fprintf(stderr, "%s: decode failed (rc=%d): %s\n", current_test, rc, err.msg);
         b = NULL;
@@ -652,7 +652,7 @@ static void test_json_wrong_version(void) {
     chc_block *b = NULL;
     chc_block_opts opts = {};
     chc_err err = {};
-    int rc = chc_block_read(&io, &al, &opts, &b, &err);
+    int rc = test_block_read_io(&io, &al, &opts, &b, &err);
     close(fd);
     int status;
     waitpid(pid, &status, 0);
@@ -782,7 +782,7 @@ static void test_invalid_array_overflow(void) {
     chc_block_opts opts = {};
     chc_block *b = NULL;
     chc_err err = {};
-    int rc = chc_block_read(&io, &al, &opts, &b, &err);
+    int rc = test_block_read_io(&io, &al, &opts, &b, &err);
     CHECK(rc == CHC_ERR_PROTOCOL);
     CHECK(b == NULL);
     CHECK(strstr(err.msg, "too large") != NULL);
@@ -923,7 +923,7 @@ static void test_qbit_decode(void) {
         chc_block_opts opts = {};
         chc_block *b = NULL;
         chc_err err = {};
-        int rc = chc_block_read(&io, &al, &opts, &b, &err);
+        int rc = test_block_read_io(&io, &al, &opts, &b, &err);
         CHECK(rc == CHC_OK);
         CHECK(b != NULL);
         if (b) {
@@ -971,7 +971,7 @@ static void test_qbit_decode(void) {
         chc_block_opts opts = {};
         chc_block *b = NULL;
         chc_err err = {};
-        int rc = chc_block_read(&io, &al, &opts, &b, &err);
+        int rc = test_block_read_io(&io, &al, &opts, &b, &err);
         CHECK(rc == CHC_OK);
         CHECK(b != NULL);
         if (b) {
