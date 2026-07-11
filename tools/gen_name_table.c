@@ -129,9 +129,7 @@ int main(void)
     }
     for (size_t b = 0; b < M; b++) {
         int i = slot[b];
-        if (i < 0) {
-            printf("    [%3zu] = {},\n", b);
-        } else {
+        if (i >= 0) {
             printf("    [%3zu] = {\"%s\", %s},\n",
                    b, rows[i].name, rows[i].kind);
         }

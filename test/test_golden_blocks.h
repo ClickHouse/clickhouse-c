@@ -105,6 +105,74 @@ done:
     return rc;
 }
 
+#ifdef CLICKHOUSE_CLIENT_H
+
+static int
+test_write_data_header(chc_io *io, chc_err *err)
+{
+    int rc = chc__write_varuint(io, CHC_PKT_DATA, err);
+    return rc ? rc : chc__write_string(io, "", 0, err);
+}
+
+CHC_MAYBE_UNUSED static int
+test_write_uint_string_packet(chc_io *io, const chc_alloc *al,
+                              const chc_block_opts *opts, int n_rows,
+                              chc_err *err)
+{
+    int rc = test_write_data_header(io, err);
+    return rc ? rc : test_write_uint_string_block(io, al, opts, n_rows, err);
+}
+
+CHC_MAYBE_UNUSED static int
+test_write_nullable_array_packet(chc_io *io, const chc_alloc *al,
+                                 const chc_block_opts *opts, chc_err *err)
+{
+    int rc = test_write_data_header(io, err);
+    return rc ? rc : test_write_nullable_array_block(io, al, opts, err);
+}
+
+CHC_MAYBE_UNUSED static int
+test_write_lc_string_packet(chc_io *io, const chc_alloc *al,
+                            const chc_block_opts *opts, chc_err *err)
+{
+    int rc = test_write_data_header(io, err);
+    return rc ? rc : test_write_lc_string_block(io, al, opts, err);
+}
+
+CHC_MAYBE_UNUSED static int
+test_write_progress_packet(chc_io *io, chc_err *err)
+{
+    int rc;
+    if ((rc = chc__write_varuint(io, CHC_PKT_PROGRESS, err))) return rc;
+    if ((rc = chc__write_varuint(io, 1000, err))) return rc;
+    if ((rc = chc__write_varuint(io, 8000, err))) return rc;
+    if ((rc = chc__write_varuint(io, 5000, err))) return rc;
+    if ((rc = chc__write_varuint(io, 7, err))) return rc;
+    return chc__write_varuint(io, 70, err);
+}
+
+#ifdef CLICKHOUSE_COMPRESSION_H
+CHC_MAYBE_UNUSED static int
+test_write_compressed_packet(chc_io *io, const chc_alloc *al,
+                             const chc_block_opts *opts, const chc_codec *codec,
+                             int n_rows, chc_err *err)
+{
+    int rc = test_write_data_header(io, err);
+    if (rc) return rc;
+    test_mem_sink raw;
+    chc_io raw_io;
+    test_mem_sink_init(&raw, &raw_io);
+    rc = test_write_uint_string_block(&raw_io, al, opts, n_rows, err);
+    if (!rc)
+        rc = chc__comp_emit_chunks(io, codec, CHC_COMP_LZ4,
+                                   raw.data, raw.len, al, err);
+    test_mem_sink_free(&raw);
+    return rc;
+}
+#endif
+
+#endif
+
 CHC_MAYBE_UNUSED static uint8_t *
 test_build_golden_stream(const chc_alloc *al, const chc_block_opts *opts,
                          int wide_rows, size_t *out_len)

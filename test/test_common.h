@@ -104,13 +104,8 @@ test_mem_read(void *ud, void *buf, size_t len, size_t *out_n, chc_err *err)
 CHC_MAYBE_UNUSED static void
 test_mem_src_init(test_mem_src *src, chc_io *io, const void *data, size_t len)
 {
-    src->data = (const uint8_t *) data;
-    src->len = len;
-    src->pos = 0;
-    io->ud = src;
-    io->read = test_mem_read;
-    io->write = NULL;
-    io->check_cancel = NULL;
+    *src = (test_mem_src) { .data = data, .len = len };
+    *io = (chc_io) { .ud = src, .read = test_mem_read };
 }
 
 /* Read one block via a throwaway chc_in over io -- for single-block sources.
@@ -154,20 +149,15 @@ test_mem_sink_write(void *ud, const void *buf, size_t n, chc_err *err)
 CHC_MAYBE_UNUSED static void
 test_mem_sink_init(test_mem_sink *sink, chc_io *io)
 {
-    memset(sink, 0, sizeof *sink);
-    io->ud = sink;
-    io->read = NULL;
-    io->write = test_mem_sink_write;
-    io->check_cancel = NULL;
+    *sink = (test_mem_sink) {};
+    *io = (chc_io) { .ud = sink, .write = test_mem_sink_write };
 }
 
 CHC_MAYBE_UNUSED static void
 test_mem_sink_free(test_mem_sink *sink)
 {
     free(sink->data);
-    sink->data = NULL;
-    sink->len = 0;
-    sink->cap = 0;
+    *sink = (test_mem_sink) {};
 }
 
 #endif

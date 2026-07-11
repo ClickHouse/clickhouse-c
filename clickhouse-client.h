@@ -209,7 +209,6 @@ int  chc_client_send_ping(chc_client *c, chc_err *err);
 #define CHC__REV_PARALLEL_REPLICAS       54453u
 #define CHC__REV_CUSTOM_SERIALIZATION    54454u
 #define CHC__REV_ADDENDUM                54458u
-#define CHC__REV_QUOTA_KEY               54458u
 #define CHC__REV_PARAMETERS              54459u
 
 /* Client → server packet kinds. */
@@ -225,6 +224,9 @@ struct chc_client {
     chc_in           in;            /* persistent buffered input */
 
     chc_server_info  server;
+    uint64_t         client_version_major;
+    uint64_t         client_version_minor;
+    uint64_t         client_version_patch;
     uint64_t         client_revision;
     chc_compression  compression;
     const chc_codec *codec;
@@ -308,13 +310,12 @@ chc__client_send_hello(chc_client *c, const chc_client_opts *opts, chc_err *err)
     return CHC_OK;
 }
 
-static int
+static void
 chc__copy_short(char *dst, size_t cap, const char *src, size_t len)
 {
     size_t n = len < cap - 1 ? len : cap - 1;
     if (n) memcpy(dst, src, n);
     dst[n] = '\0';
-    return 0;
 }
 
 /* Reads chained exception. Caller frees via chc_exception_free. */
@@ -425,6 +426,9 @@ chc_client_init(chc_client **out, const chc_client_opts *opts,
     if (!c) return CHC_ERR_OOM;
     c->al = al;
     c->io = io;
+    c->client_version_major = opts->client_version_major;
+    c->client_version_minor = opts->client_version_minor;
+    c->client_version_patch = opts->client_version_patch;
     c->client_revision = opts->client_revision ? opts->client_revision
                                                : CHC_CLIENT_DEFAULT_REVISION;
     c->compression = opts->codec ? opts->compression : CHC_COMP_NONE;
@@ -513,14 +517,9 @@ chc__client_write_block_body(chc_client *c, chc_io *sink,
     };
     if (bb) return chc_block_write(sink, bb, &opts, err);
 
-    /* Empty block: BlockInfo + 0 cols + 0 rows. */
     if (opts.has_block_info) {
-        if ((rc = chc__write_varuint(sink, 1, err))) return rc;
-        uint8_t z = 0;
-        if ((rc = chc__write_bytes(sink, &z, 1, err))) return rc;
-        if ((rc = chc__write_varuint(sink, 2, err))) return rc;
-        if ((rc = chc__write_u32_le(sink, (uint32_t) -1, err))) return rc;
-        if ((rc = chc__write_varuint(sink, 0, err))) return rc;
+        rc = chc__write_block_info(sink, err);
+        if (rc != CHC_OK) return rc;
     }
     if ((rc = chc__write_varuint(sink, 0, err))) return rc;  /* n_cols */
     if ((rc = chc__write_varuint(sink, 0, err))) return rc;  /* n_rows */
@@ -593,8 +592,8 @@ chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
         if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* os_user */
         if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* client_hostname */
         if ((rc = chc__write_string(c->io, "clickhouse-c client", 19, err))) return rc;
-        if ((rc = chc__write_varuint(c->io, 0, err))) return rc;     /* version_major */
-        if ((rc = chc__write_varuint(c->io, 0, err))) return rc;     /* version_minor */
+        if ((rc = chc__write_varuint(c->io, c->client_version_major, err))) return rc;
+        if ((rc = chc__write_varuint(c->io, c->client_version_minor, err))) return rc;
         if ((rc = chc__write_varuint(c->io, c->client_revision, err))) return rc;
 
         if (c->server.revision >= CHC__REV_QUOTA_KEY_IN_CLIENT)
@@ -602,7 +601,7 @@ chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
         if (c->server.revision >= CHC__REV_DISTRIBUTED_DEPTH)
             if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
         if (c->server.revision >= CHC__REV_VERSION_PATCH)
-            if ((rc = chc__write_varuint(c->io, 0, err))) return rc;  /* version_patch */
+            if ((rc = chc__write_varuint(c->io, c->client_version_patch, err))) return rc;
         if (c->server.revision >= CHC__REV_OPENTELEMETRY) {
             uint8_t no_otel = 0;
             if ((rc = chc__write_bytes(c->io, &no_otel, 1, err))) return rc;
@@ -805,9 +804,7 @@ chc__recv_block_compressed_resume(chc_client *c, const chc_block_opts *opts,
             return CHC_WOULD_BLOCK;
         }
         if (frc != CHC_OK) {                     /* hash mismatch / codec / oom */
-            chc__client_recv_comp_free(c);
-            if (c->recv_partial) { chc_block_destroy(c->recv_partial, c->al); c->recv_partial = NULL; }
-            c->recv_next_col = 0;
+            chc__client_recv_state_free(c);
             return frc;
         }
         /* Complete frame committed (no rewind); push its decompressed bytes.
@@ -815,9 +812,7 @@ chc__recv_block_compressed_resume(chc_client *c, const chc_block_opts *opts,
         rc = chc_in_submit(&c->recv_dec_in, c->recv_decomp.frame_buf,
                            c->recv_decomp.frame_fill, err);
         if (rc != CHC_OK) {
-            chc__client_recv_comp_free(c);
-            if (c->recv_partial) { chc_block_destroy(c->recv_partial, c->al); c->recv_partial = NULL; }
-            c->recv_next_col = 0;
+            chc__client_recv_state_free(c);
             return rc;
         }
     }

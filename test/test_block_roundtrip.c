@@ -74,6 +74,10 @@ read_all(int fd, size_t *out_len)
     return buf;
 }
 
+static char *capture_roundtrip(const char *test_name, chc_block_builder *bb,
+                               const char *structure, const char *sql,
+                               size_t *out_len);
+
 static void
 test_write_uint32(void)
 {
@@ -95,28 +99,10 @@ test_write_uint32(void)
         fprintf(stderr, "%s: append: %s\n", current_test, err.msg); fail_count++; return;
     }
 
-    int wfd, rfd;
-    pid_t pid = spawn_local_input("SELECT sum(x) FROM table",
-                                  "x UInt32", &wfd, &rfd);
-    CHECK(pid > 0);
-
-    chc_posix_io state; chc_io io;
-    chc_posix_io_init(&state, &io, wfd, NULL, NULL);
-    if (chc_block_write(&io, bb, NULL, &err) < 0) {
-        fprintf(stderr, "%s: write: %s\n", current_test, err.msg);
-        fail_count++;
-    }
-    close(wfd);
-
     size_t out_len;
-    char *out = read_all(rfd, &out_len);
-    close(rfd);
-    int status; waitpid(pid, &status, 0);
-    CHECK(WIFEXITED(status));
-    CHECK(WEXITSTATUS(status) == 0);
-
-    /* Default format is TSV with newline. Expect "150\n". */
-    if (out_len < 3 || strncmp(out, "150", 3) != 0) {
+    char *out = capture_roundtrip(current_test, bb, "x UInt32",
+                                  "SELECT sum(x) FROM table", &out_len);
+    if (out && (out_len < 3 || strncmp(out, "150", 3) != 0)) {
         fprintf(stderr, "%s: unexpected output (len=%zu): %.*s\n",
                 current_test, out_len, (int) out_len, out);
         fail_count++;
@@ -145,29 +131,10 @@ test_write_string(void)
         fprintf(stderr, "%s: append: %s\n", current_test, err.msg); fail_count++; return;
     }
 
-    int wfd, rfd;
-    pid_t pid = spawn_local_input(
-        "SELECT groupArray(s) FROM table FORMAT TSV",
-        "s String", &wfd, &rfd);
-    CHECK(pid > 0);
-
-    chc_posix_io state; chc_io io;
-    chc_posix_io_init(&state, &io, wfd, NULL, NULL);
-    if (chc_block_write(&io, bb, NULL, &err) < 0) {
-        fprintf(stderr, "%s: write: %s\n", current_test, err.msg);
-        fail_count++;
-    }
-    close(wfd);
-
     size_t out_len;
-    char *out = read_all(rfd, &out_len);
-    close(rfd);
-    int status; waitpid(pid, &status, 0);
-    CHECK(WIFEXITED(status));
-    CHECK(WEXITSTATUS(status) == 0);
-
-    /* TSV: ['ab','cde',''] */
-    if (out_len < 1 || !strstr(out, "ab") || !strstr(out, "cde")) {
+    char *out = capture_roundtrip(current_test, bb, "s String",
+        "SELECT groupArray(s) FROM table FORMAT TSV", &out_len);
+    if (out && (out_len < 1 || !strstr(out, "ab") || !strstr(out, "cde"))) {
         fprintf(stderr, "%s: unexpected: %.*s\n", current_test,
                 (int) out_len, out);
         fail_count++;
@@ -177,8 +144,6 @@ test_write_string(void)
     chc_block_builder_destroy(bb);
 }
 
-/* Drive `clickhouse local` with the built block, return captured TSV
- * output (caller frees) or NULL on spawn failure. */
 static char *
 capture_roundtrip(const char *test_name, chc_block_builder *bb,
                   const char *structure, const char *sql, size_t *out_len)

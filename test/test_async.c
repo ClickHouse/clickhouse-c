@@ -14,12 +14,6 @@
  * chunking, including across mid-block-header and mid-column splits (the 1/2/3
  * byte chunkings guarantee these).
  *
- * Uncompressed-only so it links with no extra libs under the test.sh harness
- * (test.sh adds -llz4 only for ioless/client_tcp). The compressed recv path's
- * framing (baseline rewind-to-block-start, chc__recv_block_compressed) is
- * exercised by test_ioless.c's compressed golden gate at the block layer; a
- * compressed async-level test is a noted follow-up needing -llz4 wiring.
- *
  * Also drives the handshake state machine in isolation against a hand-built
  * Hello+Pong stream, chunked to DONE.
  *
@@ -47,132 +41,12 @@ static const char *current_test = "";
 
 #include "test_common.h"
 #include "test_block_compare.h"
+#include "test_golden_blocks.h"
 
 /* Fixed revision: block_info + custom_serialization + temp tables all on. */
 #define TEST_REVISION CHC_CLIENT_DEFAULT_REVISION
 
 static chc_alloc test_make_alloc(void) { return chc_alloc_stdlib(); }
-
-/* ---------------- fixture: server->client response stream --------------- */
-
-/* One Data packet: tag varuint + temp-table name "" + block body. */
-static int
-write_data_packet_uint_string(chc_io *io, const chc_alloc *al,
-                              const chc_block_opts *opts, int N, chc_err *err)
-{
-    int rc = -1;
-    chc_block_builder *bb = NULL;
-    chc_type *tu = NULL, *ts = NULL;
-    uint32_t *u = malloc((size_t) N * sizeof *u);
-    uint64_t *off = malloc((size_t) N * sizeof *off);
-    char *sdata = malloc((size_t) N * 12);
-    if (!u || !off || !sdata) goto done;
-
-    size_t total = 0;
-    for (int i = 0; i < N; i++) {
-        u[i] = (uint32_t) (i * 2654435761u);
-        int k = snprintf(sdata + total, 12, "%d", i);
-        total += (size_t) k;
-        off[i] = total;
-    }
-    if (chc_block_builder_init(&bb, al, err)) goto done;
-    if (chc_type_parse("UInt32", 6, al, &tu, err)) goto done;
-    if (chc_type_parse("String", 6, al, &ts, err)) goto done;
-    if (chc_block_builder_append_fixed(bb, "u", 1, tu, u, N, err)) goto done;
-    if (chc_block_builder_append_string(bb, "s", 1, off, (uint8_t *) sdata, N, err)) goto done;
-
-    if ((rc = chc__write_varuint(io, CHC_PKT_DATA, err))) goto done;
-    if ((rc = chc__write_string(io, "", 0, err))) goto done;     /* temp-table name */
-    rc = chc_block_write(io, bb, opts, err);
-done:
-    chc_block_builder_destroy(bb);
-    chc_type_destroy(tu, al);
-    chc_type_destroy(ts, al);
-    free(u); free(off); free(sdata);
-    return rc;
-}
-
-/* One Data packet carrying Nullable(String) + Array(UInt32) + LowCardinality. */
-static int
-write_data_packet_composite(chc_io *io, const chc_alloc *al,
-                            const chc_block_opts *opts, chc_err *err)
-{
-    int rc = -1;
-    chc_block_builder *bb = NULL;
-    chc_type *tn = NULL, *ta = NULL, *tlc = NULL;
-    uint8_t  nulls[4]  = { 0, 1, 0, 1 };
-    uint64_t noff[4]   = { 2, 2, 5, 5 };
-    const uint8_t nbuf[] = "abcde";
-    uint64_t aoff[4]   = { 3, 3, 6, 10 };
-    uint32_t aval[10]  = { 1,2,3, 7,8,9, 10,11,12,13 };
-    uint64_t doff[3]   = { 3, 8, 12 };
-    const uint8_t ddata[] = "redgreenblue";
-    uint8_t keys[5] = { 0, 2, 1, 0, 2 };
-
-    if (chc_block_builder_init(&bb, al, err)) goto done;
-    if (chc_type_parse("Nullable(String)", 16, al, &tn, err)) goto done;
-    if (chc_type_parse("Array(UInt32)", 13, al, &ta, err)) goto done;
-    if (chc_type_parse("LowCardinality(String)", 22, al, &tlc, err)) goto done;
-    if (chc_block_builder_append_nullable_string(bb, "n", 1, tn,
-            nulls, noff, nbuf, 4, err)) goto done;
-    if (chc_block_builder_append_array_fixed(bb, "a", 1, ta, aoff, aval, 4, err))
-        goto done;
-    /* composite block: 5-row LC vs 4-row others would mismatch row count, so
-     * keep LC in its own packet (below); here just nullable + array, 4 rows. */
-    (void) doff; (void) ddata; (void) keys; (void) tlc;
-
-    if ((rc = chc__write_varuint(io, CHC_PKT_DATA, err))) goto done;
-    if ((rc = chc__write_string(io, "", 0, err))) goto done;
-    rc = chc_block_write(io, bb, opts, err);
-done:
-    chc_block_builder_destroy(bb);
-    chc_type_destroy(tn, al);
-    chc_type_destroy(ta, al);
-    chc_type_destroy(tlc, al);
-    return rc;
-}
-
-/* One Data packet carrying a LowCardinality(String) block. */
-static int
-write_data_packet_lc(chc_io *io, const chc_alloc *al,
-                     const chc_block_opts *opts, chc_err *err)
-{
-    int rc = -1;
-    chc_block_builder *bb = NULL;
-    chc_type *t = NULL;
-    uint64_t doff[3] = { 3, 8, 12 };
-    const uint8_t ddata[] = "redgreenblue";
-    uint8_t keys[5] = { 0, 2, 1, 0, 2 };
-
-    if (chc_block_builder_init(&bb, al, err)) goto done;
-    if (chc_type_parse("LowCardinality(String)", 22, al, &t, err)) goto done;
-    if (chc_block_builder_append_low_cardinality_string(bb, "lc", 2, t,
-            1, keys, doff, ddata, 3, 5, err)) goto done;
-
-    if ((rc = chc__write_varuint(io, CHC_PKT_DATA, err))) goto done;
-    if ((rc = chc__write_string(io, "", 0, err))) goto done;
-    rc = chc_block_write(io, bb, opts, err);
-done:
-    chc_block_builder_destroy(bb);
-    chc_type_destroy(t, al);
-    return rc;
-}
-
-/* Progress packet for revision >= CHC__REV_CLIENT_WRITE_INFO (the test
- * revision): tag + 5 varuints (rows, bytes, total_rows, written_rows,
- * written_bytes). */
-static int
-write_progress_packet(chc_io *io, chc_err *err)
-{
-    int rc;
-    if ((rc = chc__write_varuint(io, CHC_PKT_PROGRESS, err))) return rc;
-    if ((rc = chc__write_varuint(io, 1000, err))) return rc;   /* rows */
-    if ((rc = chc__write_varuint(io, 8000, err))) return rc;   /* bytes */
-    if ((rc = chc__write_varuint(io, 5000, err))) return rc;   /* total_rows */
-    if ((rc = chc__write_varuint(io, 7, err)))    return rc;   /* written_rows */
-    if ((rc = chc__write_varuint(io, 70, err)))   return rc;   /* written_bytes */
-    return CHC_OK;
-}
 
 #define SEQ_LEN 5  /* data(wide) + data(composite) + data(lc) + progress + eos */
 
@@ -184,10 +58,10 @@ build_response_stream(const chc_alloc *al, const chc_block_opts *opts,
     chc_io io;
     test_mem_sink_init(&s, &io);
     chc_err err = {};
-    if (write_data_packet_uint_string(&io, al, opts, 3000, &err) ||
-        write_data_packet_composite(&io, al, opts, &err) ||
-        write_data_packet_lc(&io, al, opts, &err) ||
-        write_progress_packet(&io, &err) ||
+    if (test_write_uint_string_packet(&io, al, opts, 3000, &err) ||
+        test_write_nullable_array_packet(&io, al, opts, &err) ||
+        test_write_lc_string_packet(&io, al, opts, &err) ||
+        test_write_progress_packet(&io, &err) ||
         chc__write_varuint(&io, CHC_PKT_END_OF_STREAM, &err)) {
         fprintf(stderr, "build_response_stream: %s\n", err.msg);
         test_mem_sink_free(&s);
@@ -503,7 +377,15 @@ test_out_shuttle(void)
     chc_alloc al = test_make_alloc();
     chc_err err = {};
     chc_async_client *c = NULL;
-    CHECK_OK(chc_async_client_init(&c, NULL, &al, &err), err);
+    chc_client_opts opts = {
+        .client_version_major = 1,
+        .client_version_minor = 2,
+        .client_version_patch = 3,
+    };
+    CHECK_OK(chc_async_client_init(&c, &opts, &al, &err), err);
+    CHECK_EQ_U64(c->cli.client_version_major, 1);
+    CHECK_EQ_U64(c->cli.client_version_minor, 2);
+    CHECK_EQ_U64(c->cli.client_version_patch, 3);
     c->cli.server.revision = TEST_REVISION;
 
     /* A query buffers bytes; draining in pieces then fully resets the sink. */

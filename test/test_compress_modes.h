@@ -37,27 +37,6 @@ static const char *current_test = "";
 #define MED_ROWS 5000    /* second multi-frame block, back-to-back */
 #define N_DATA   2
 
-/* One compressed Data packet: uncompressed [tag][temp-table name ""] framing,
- * then the block body emitted as one or more LZ4 frames. */
-static int
-write_data_packet_compressed(chc_io *io, const chc_alloc *al,
-                             const chc_block_opts *opts, const chc_codec *codec,
-                             int n_rows, chc_err *err)
-{
-    int rc;
-    if ((rc = chc__write_varuint(io, CHC_PKT_DATA, err))) return rc;
-    if ((rc = chc__write_string(io, "", 0, err))) return rc;     /* temp-table name */
-
-    test_mem_sink raw;
-    chc_io rio;
-    test_mem_sink_init(&raw, &rio);
-    rc = test_write_uint_string_block(&rio, al, opts, n_rows, err);
-    if (rc) { test_mem_sink_free(&raw); return rc; }
-    rc = chc__comp_emit_chunks(io, codec, CHC_COMP_LZ4, raw.data, raw.len, al, err);
-    test_mem_sink_free(&raw);
-    return rc;
-}
-
 static uint8_t *
 build_compressed_stream(const chc_alloc *al, const chc_block_opts *opts,
                         const chc_codec *codec, size_t *out_len)
@@ -66,8 +45,8 @@ build_compressed_stream(const chc_alloc *al, const chc_block_opts *opts,
     chc_io io;
     test_mem_sink_init(&s, &io);
     chc_err err = {};
-    if (write_data_packet_compressed(&io, al, opts, codec, BIG_ROWS, &err) ||
-        write_data_packet_compressed(&io, al, opts, codec, MED_ROWS, &err) ||
+    if (test_write_compressed_packet(&io, al, opts, codec, BIG_ROWS, &err) ||
+        test_write_compressed_packet(&io, al, opts, codec, MED_ROWS, &err) ||
         chc__write_varuint(&io, CHC_PKT_END_OF_STREAM, &err)) {
         fprintf(stderr, "build_compressed_stream: %s\n", err.msg);
         test_mem_sink_free(&s);

@@ -862,6 +862,18 @@ static void test_type_parse_numeric_bounds(void) {
         chc_type_destroy(t, &al);
     }
 
+    {
+        chc_type *t = NULL;
+        chc_err err = {};
+        int rc = chc_type_parse("Decimal(5, 2)", 13, &al, &t, &err);
+        CHECK_EQ_I64(rc, CHC_OK);
+        if (t) {
+            CHECK_EQ_I64(chc_type_decimal_precision(t), 5);
+            CHECK_EQ_I64(chc_type_decimal_scale(t), 2);
+            chc_type_destroy(t, &al);
+        }
+    }
+
     const char *bad[] = {
         "FixedString(99999999999999999999)",      /* > INT64_MAX */
         "FixedString(9223372036854775808)",       /* INT64_MAX + 1 */

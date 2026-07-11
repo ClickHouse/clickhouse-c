@@ -65,8 +65,6 @@ void chc_async_packet_clear(chc_async_client *c, chc_packet *p);
 }
 #endif
 
-#endif /* CLICKHOUSE_ASYNC_H */
-
 #ifdef CHC_IMPLEMENTATION
 
 /* This block compiles in the same TU as clickhouse-client.h's implementation,
@@ -99,19 +97,12 @@ struct chc_async_client {
     char *database;
     char *user;
     char *password;
-    uint64_t client_version_major;
-    uint64_t client_version_minor;
 };
 
 static char *
 chc__async_dup(const chc_alloc *al, const char *s, chc_err *err)
 {
-    if (!s) return NULL;
-    size_t n = strlen(s);
-    char *p = al->alloc(al->ud, n + 1);
-    if (!p) { chc__err_set(err, CHC_ERR_OOM, "alloc(%zu) failed", n + 1); return NULL; }
-    memcpy(p, s, n + 1);
-    return p;
+    return s ? chc__strdup(al, s, strlen(s), err) : NULL;
 }
 
 static void
@@ -131,6 +122,9 @@ chc_async_client_init(chc_async_client **out, const chc_client_opts *opts,
     if (!c) return CHC_ERR_OOM;
 
     c->cli.al = al;
+    c->cli.client_version_major = opts->client_version_major;
+    c->cli.client_version_minor = opts->client_version_minor;
+    c->cli.client_version_patch = opts->client_version_patch;
     c->cli.client_revision = opts->client_revision ? opts->client_revision
                                                    : CHC_CLIENT_DEFAULT_REVISION;
     c->cli.compression = opts->codec ? opts->compression : CHC_COMP_NONE;
@@ -145,9 +139,7 @@ chc_async_client_init(chc_async_client **out, const chc_client_opts *opts,
     int rc = chc_in_init_ioless(&c->cli.in, al);
     if (rc != CHC_OK) { al->free(al->ud, c, sizeof *c); return rc; }
 
-    /* Stash Hello inputs; opts strings are borrowed and need not outlive init. */
-    c->client_version_major = opts->client_version_major;
-    c->client_version_minor = opts->client_version_minor;
+    /* Own strings used after init. */
     if ((opts->client_name && !(c->client_name = chc__async_dup(al, opts->client_name, err))) ||
         (opts->database    && !(c->database    = chc__async_dup(al, opts->database,    err))) ||
         (opts->user        && !(c->user        = chc__async_dup(al, opts->user,        err))) ||
@@ -203,19 +195,6 @@ chc_async_consume_out(chc_async_client *c, size_t n)
     }
 }
 
-static void
-chc__async_hello_opts(const chc_async_client *c, chc_client_opts *o)
-{
-    memset(o, 0, sizeof *o);
-    o->client_name = c->client_name;
-    o->client_version_major = c->client_version_major;
-    o->client_version_minor = c->client_version_minor;
-    o->client_revision = c->cli.client_revision;
-    o->database = c->database;
-    o->user = c->user;
-    o->password = c->password;
-}
-
 int
 chc_async_handshake(chc_async_client *c, chc_err *err)
 {
@@ -225,8 +204,16 @@ chc_async_handshake(chc_async_client *c, chc_err *err)
     for (;;) {
         switch (c->hs_phase) {
         case CHC__HS_SEND_HELLO: {
-            chc_client_opts o;
-            chc__async_hello_opts(c, &o);
+            chc_client_opts o = {
+                .client_name = c->client_name,
+                .client_version_major = cli->client_version_major,
+                .client_version_minor = cli->client_version_minor,
+                .client_version_patch = cli->client_version_patch,
+                .client_revision = cli->client_revision,
+                .database = c->database,
+                .user = c->user,
+                .password = c->password,
+            };
             rc = chc__client_send_hello(cli, &o, err);
             if (rc != CHC_OK) return rc;
             c->hs_phase = CHC__HS_RECV_HELLO;
@@ -310,3 +297,5 @@ chc_async_recv_packet(chc_async_client *c, chc_packet *out, chc_err *err)
 }
 
 #endif /* CHC_IMPLEMENTATION */
+
+#endif /* CLICKHOUSE_ASYNC_H */
