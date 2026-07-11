@@ -102,6 +102,7 @@ void chc_zstd_codec_init(chc_codec *out);
 
 #ifdef CHC_IMPLEMENTATION
 
+#include <limits.h>
 #include <string.h>
 
 /* ============================================================
@@ -434,6 +435,11 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
     if (comp_with_hdr > 0x40000000u)
         return chc__err_set(err, CHC_ERR_PROTOCOL,
             "compressed frame oversized: %u", comp_with_hdr);
+    /* LZ4 API sizes are int; reject dst outside domain before (int)
+     * narrowing in codec adapter. src side bounded by frame cap above */
+    if (method == CHC__COMP_LZ4 && orig > (uint32_t) INT_MAX)
+        return chc__err_set(err, CHC_ERR_PROTOCOL,
+            "LZ4 original size oversized: %u", orig);
 
     size_t payload = comp_with_hdr - CHC__COMP_HEADER_BYTES;
     /* Capture the bytes hashed: header (9B) + payload. */
