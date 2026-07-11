@@ -739,7 +739,7 @@ chc__recv_block_compressed(chc_client *c, const chc_block_opts *opts,
     chc_in dec_in;
     int rc = chc_in_init(&dec_in, &decomp_io, c->al, 0, err);
     if (rc != CHC_OK) { chc__decomp_src_free(&src); return rc; }
-    rc = chc__block_read_in(&dec_in, c->al, opts, out, err);
+    rc = chc_block_read(&dec_in, c->al, opts, out, err);
     chc_in_free(&dec_in);
     chc__decomp_src_free(&src);
     if (ioless && rc == CHC_WOULD_BLOCK) chc__in_rewind(&c->in);

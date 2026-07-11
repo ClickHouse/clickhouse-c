@@ -140,11 +140,22 @@ main(int argc, char **argv)
      * has_custom_serialization (no protocol revision negotiated). */
     chc_block_opts opts = {};
 
+    /* Streaming successive blocks needs one chc_in across all reads so bytes
+     * read past a block boundary stay buffered for the next block. */
+    chc_err ierr = {};
+    chc_in in;
+    if (chc_in_init(&in, &io, &al, opts.read_buffer_bytes, &ierr) != CHC_OK) {
+        fprintf(stderr, "init: %s\n", ierr.msg);
+        close(fd);
+        waitpid(pid, &(int){0}, 0);
+        return 1;
+    }
+
     int rc = 0;
     for (;;) {
         chc_block *block = NULL;
         chc_err err = {};
-        if (chc_block_read(&io, &al, &opts, &block, &err) != CHC_OK) {
+        if (chc_block_read(&in, &al, &opts, &block, &err) != CHC_OK) {
             fprintf(stderr, "decode: %s\n", err.msg);
             rc = 1; break;
         }
@@ -164,6 +175,7 @@ main(int argc, char **argv)
         chc_block_destroy(block, &al);
     }
 
+    chc_in_free(&in);
     close(fd);
     int status;
     waitpid(pid, &status, 0);

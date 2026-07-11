@@ -36,10 +36,19 @@ int main(void) {
 
     chc_block_opts opts = {};   /* clickhouse-local: no BlockInfo, no custom serialization */
 
+    /* One persistent reader for the whole stream: chc_block_read keeps
+       bytes read past a block boundary buffered for the next block. */
+    chc_err ierr = {};
+    chc_in in;
+    if (chc_in_init(&in, &io, &al, opts.read_buffer_bytes, &ierr) != CHC_OK) {
+        fprintf(stderr, "init: %s\n", ierr.msg);
+        return 1;
+    }
+
     for (;;) {
         chc_block *block = NULL;
         chc_err err = {};
-        if (chc_block_read(&io, &al, &opts, &block, &err) != CHC_OK) {
+        if (chc_block_read(&in, &al, &opts, &block, &err) != CHC_OK) {
             fprintf(stderr, "decode: %s\n", err.msg);
             return 1;
         }
@@ -51,6 +60,7 @@ int main(void) {
 
         chc_block_destroy(block, &al);
     }
+    chc_in_free(&in);
 }
 ```
 

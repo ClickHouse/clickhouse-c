@@ -262,7 +262,7 @@ typedef struct chc_block_opts {
     size_t read_buffer_bytes;         /* 0 = default 8 KiB */
 } chc_block_opts;
 
-int  chc_block_read   (chc_io *io, const chc_alloc *al,
+int  chc_block_read   (chc_in *in, const chc_alloc *al,
                        const chc_block_opts *opts,
                        chc_block **out, chc_err *err);
 void chc_block_destroy(chc_block *b, const chc_alloc *al);
@@ -281,6 +281,11 @@ Clean EOF at a block boundary returns `CHC_OK` with `*out == NULL`. Any
 short read mid-block is `CHC_ERR_EOF`. The TCP packet loop in
 [clickhouse-client.md](clickhouse-client.md) drives this with the right
 `opts` flags; for `clickhouse local` over a pipe both flags are false.
+
+`chc_block_read` takes a caller-owned `chc_in`. Init one `chc_in` (`chc_in_init`
+/ `chc_in_free`) and loop `chc_block_read` over it to stream successive blocks —
+bytes read past a block boundary stay buffered for the next call. A fresh
+`chc_in` per block would drop that over-read tail and mis-frame the stream.
 
 BlockInfo accessors return zero when `has_block_info == false`.
 

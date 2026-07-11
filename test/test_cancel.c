@@ -63,8 +63,8 @@ cancel_cb(void *ud) {
 /*
  * Bury a buffered-reader read behind a chc_io. We don't have access to
  * the internal chc__in machinery without copying it, so test the cancel
- * hook through the public surface that uses it: chc_block_read on a
- * stream that doesn't start with a valid block header but does start
+ * hook through the public surface that uses it: chc_block_read (via a
+ * throwaway chc_in) on a stream that doesn't start with a valid block header but does start
  * with a `read()` call. We only care whether the read is short-circuited
  * by the cancel hook before any bytes get consumed, & whether the
  * function returns CHC_ERR_CANCELLED in that case.
@@ -76,7 +76,7 @@ read_block_with_cancel(int fd, chc_block **out_block, chc_err *err) {
     chc_io io;
     chc_posix_io_init(&state, &io, fd, cancel_cb, NULL);
     chc_block_opts opts = {};
-    return chc_block_read(&io, &al, &opts, out_block, err);
+    return test_block_read_io(&io, &al, &opts, out_block, err);
 }
 
 /* (1) Pre-cancel: cancel is set before chc_block_read starts. The first
@@ -269,7 +269,7 @@ test_read_deadline(void) {
     chc_block_opts opts = {};
     chc_block *b = NULL;
     chc_err err = {};
-    int rc = chc_block_read(&io, &al, &opts, &b, &err);
+    int rc = test_block_read_io(&io, &al, &opts, &b, &err);
     clock_gettime(CLOCK_MONOTONIC, &t1);
     long elapsed_ms = (t1.tv_sec - t0.tv_sec) * 1000
                     + (t1.tv_nsec - t0.tv_nsec) / 1000000;

@@ -135,7 +135,7 @@ test_decode_blocks_io(const uint8_t *bytes, size_t len, const chc_alloc *al,
     chc_in in;
     if (chc_in_init(&in, &io, al, 0, err)) return -1;
     for (size_t i = 0; i < n_blocks; i++) {
-        int rc = chc__block_read_in(&in, al, opts, &out[i], err);
+        int rc = chc_block_read(&in, al, opts, &out[i], err);
         if (rc != CHC_OK || !out[i]) {
             chc_in_free(&in);
             return -1;
