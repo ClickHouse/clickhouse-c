@@ -36,7 +36,6 @@ void chc_posix_io_set_deadline(chc_posix_io *state, int64_t deadline_us);
 #include <errno.h>
 #include <limits.h>
 #include <poll.h>
-#include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -104,21 +103,20 @@ static int
 chc__posix_cancel(void *ud)
 {
     chc_posix_io *s = ud;
-    return s->check_cancel ? (s->check_cancel(s->cancel_ud) ? 1 : 0) : 0;
+    return s->check_cancel && s->check_cancel(s->cancel_ud);
 }
 
 void
 chc_posix_io_init(chc_posix_io *state, chc_io *out_io, int fd,
                   bool (*check_cancel)(void *), void *cancel_ud)
 {
-    state->fd = fd;
-    state->check_cancel = check_cancel;
-    state->cancel_ud = cancel_ud;
-    state->deadline_us = 0;
-    out_io->ud = state;
-    out_io->read = chc__posix_read;
-    out_io->write = chc__posix_write;
-    out_io->check_cancel = check_cancel ? chc__posix_cancel : NULL;
+    *state = (chc_posix_io) {
+        .fd = fd, .check_cancel = check_cancel, .cancel_ud = cancel_ud,
+    };
+    *out_io = (chc_io) {
+        .ud = state, .read = chc__posix_read, .write = chc__posix_write,
+        .check_cancel = check_cancel ? chc__posix_cancel : NULL,
+    };
 }
 
 void

@@ -75,42 +75,6 @@ make_counting_codec(void)
     return c;
 }
 
-/* ---------------- fixture: compressed server->client stream ------------- */
-
-/* One compressed Data packet: uncompressed [tag][temp-table name ""] framing,
- * then the block body emitted as one or more LZ4 frames. */
-static int
-write_data_packet_compressed(chc_io *io, const chc_alloc *al,
-                             const chc_block_opts *opts, const chc_codec *codec,
-                             int n_rows, chc_err *err)
-{
-    int rc;
-    if ((rc = chc__write_varuint(io, CHC_PKT_DATA, err))) return rc;
-    if ((rc = chc__write_string(io, "", 0, err))) return rc;     /* temp-table name */
-
-    test_mem_sink raw;
-    chc_io rio;
-    test_mem_sink_init(&raw, &rio);
-    rc = test_write_uint_string_block(&rio, al, opts, n_rows, err);
-    if (rc) { test_mem_sink_free(&raw); return rc; }
-    rc = chc__comp_emit_chunks(io, codec, CHC_COMP_LZ4, raw.data, raw.len, al, err);
-    test_mem_sink_free(&raw);
-    return rc;
-}
-
-static int
-write_progress_packet(chc_io *io, chc_err *err)
-{
-    int rc;
-    if ((rc = chc__write_varuint(io, CHC_PKT_PROGRESS, err))) return rc;
-    if ((rc = chc__write_varuint(io, 1000, err))) return rc;   /* rows */
-    if ((rc = chc__write_varuint(io, 8000, err))) return rc;   /* bytes */
-    if ((rc = chc__write_varuint(io, 5000, err))) return rc;   /* total_rows */
-    if ((rc = chc__write_varuint(io, 7, err)))    return rc;   /* written_rows */
-    if ((rc = chc__write_varuint(io, 70, err)))   return rc;   /* written_bytes */
-    return CHC_OK;
-}
-
 #define SEQ_LEN 4  /* data(big) + data(med) + progress + eos */
 #define BIG_ROWS 30000   /* > CHC_COMPRESS_MAX_CHUNK raw => multi-frame */
 #define MED_ROWS 5000    /* second multi-frame block, back-to-back */
@@ -123,9 +87,9 @@ build_response_stream(const chc_alloc *al, const chc_block_opts *opts,
     chc_io io;
     test_mem_sink_init(&s, &io);
     chc_err err = {};
-    if (write_data_packet_compressed(&io, al, opts, codec, BIG_ROWS, &err) ||
-        write_data_packet_compressed(&io, al, opts, codec, MED_ROWS, &err) ||
-        write_progress_packet(&io, &err) ||
+    if (test_write_compressed_packet(&io, al, opts, codec, BIG_ROWS, &err) ||
+        test_write_compressed_packet(&io, al, opts, codec, MED_ROWS, &err) ||
+        test_write_progress_packet(&io, &err) ||
         chc__write_varuint(&io, CHC_PKT_END_OF_STREAM, &err)) {
         fprintf(stderr, "build_response_stream: %s\n", err.msg);
         test_mem_sink_free(&s);
@@ -382,7 +346,7 @@ test_teardown_mid_block(void)
     test_mem_sink s;
     chc_io io;
     test_mem_sink_init(&s, &io);
-    if (write_data_packet_compressed(&io, &al, &opts, &codec, BIG_ROWS, &err)) {
+    if (test_write_compressed_packet(&io, &al, &opts, &codec, BIG_ROWS, &err)) {
         fprintf(stderr, "%s: build failed: %s\n", current_test, err.msg);
         fail_count++; test_mem_sink_free(&s); return;
     }

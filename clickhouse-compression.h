@@ -40,8 +40,7 @@ extern "C" {
 
 /* Compression mode for client Data packets. Shared between
  * clickhouse-client.h and clickhouse-compression.h so consumers can
- * include the latter in isolation if they're driving the frame format
- * directly. */
+ * include the latter in isolation if driving frame format directly. */
 typedef enum chc_compression {
     CHC_COMP_NONE = 0,
     CHC_COMP_LZ4  = 1,
@@ -255,7 +254,6 @@ chc_cityhash128(const void *data, size_t len,
  * Frame I/O
  * ============================================================ */
 
-#define CHC__COMP_NONE 0x02u
 #define CHC__COMP_LZ4  0x82u
 #define CHC__COMP_ZSTD 0x90u
 #define CHC__COMP_HEADER_BYTES 9u
@@ -308,15 +306,11 @@ chc__comp_emit_frame(chc_io *io, const chc_codec *codec, chc_compression m,
 
     uint32_t comp_with_hdr = (uint32_t) (comp_sz + CHC__COMP_HEADER_BYTES);
     uint32_t orig = (uint32_t) src_len;
+    uint32_t comp_le = chc__bswap32(comp_with_hdr);
+    uint32_t orig_le = chc__bswap32(orig);
     buf[0] = method;
-    buf[1] = (uint8_t)  comp_with_hdr;
-    buf[2] = (uint8_t) (comp_with_hdr >> 8);
-    buf[3] = (uint8_t) (comp_with_hdr >> 16);
-    buf[4] = (uint8_t) (comp_with_hdr >> 24);
-    buf[5] = (uint8_t)  orig;
-    buf[6] = (uint8_t) (orig >> 8);
-    buf[7] = (uint8_t) (orig >> 16);
-    buf[8] = (uint8_t) (orig >> 24);
+    memcpy(buf + 1, &comp_le, sizeof comp_le);
+    memcpy(buf + 5, &orig_le, sizeof orig_le);
 
     uint64_t lo, hi;
     chc_cityhash128(buf, CHC__COMP_HEADER_BYTES + comp_sz, &lo, &hi);
@@ -343,9 +337,17 @@ chc__mem_sink_write(void *ud, const void *p, size_t n, chc_err *err)
 {
     chc__mem_sink *s = ud;
     if (s->oom) return chc__err_set(err, CHC_ERR_OOM, "mem sink oom");
-    if (s->len + n > s->cap) {
+    if (n > SIZE_MAX - s->len) {
+        s->oom = 1;
+        return chc__err_set(err, CHC_ERR_OOM, "mem sink size overflow");
+    }
+    size_t need = s->len + n;
+    if (need > s->cap) {
         size_t new_cap = s->cap ? s->cap : 4096;
-        while (new_cap < s->len + n) new_cap *= 2;
+        while (new_cap < need) {
+            if (new_cap > SIZE_MAX / 2) { new_cap = need; break; }
+            new_cap *= 2;
+        }
         uint8_t *nb = chc__realloc(s->al, s->buf, s->cap, new_cap, err);
         if (!nb) { s->oom = 1; return CHC_ERR_OOM; }
         s->buf = nb; s->cap = new_cap;
@@ -355,25 +357,19 @@ chc__mem_sink_write(void *ud, const void *p, size_t n, chc_err *err)
     return CHC_OK;
 }
 
-static int chc__mem_sink_read(void *ud, void *b, size_t n, size_t *o, chc_err *e)
-{ (void) ud; (void) b; (void) n; (void) o; (void) e; return -1; }
-
 CHC_MAYBE_UNUSED static void
 chc__mem_sink_init(chc__mem_sink *s, chc_io *io, const chc_alloc *al)
 {
-    memset(s, 0, sizeof *s);
-    s->al = al;
-    io->ud           = s;
-    io->read         = chc__mem_sink_read;
-    io->write        = chc__mem_sink_write;
-    io->check_cancel = NULL;
+    *s = (chc__mem_sink) { .al = al };
+    *io = (chc_io) { .ud = s, .write = chc__mem_sink_write };
 }
 
 CHC_MAYBE_UNUSED static void
 chc__mem_sink_free(chc__mem_sink *s)
 {
     s->al->free(s->al->ud, s->buf, s->cap);
-    s->buf = NULL; s->cap = 0; s->len = 0;
+    s->buf = NULL;
+    s->cap = s->len = 0;
 }
 
 /* Emit a buffered block as one or more compressed frames to io. */
@@ -422,13 +418,12 @@ chc__decomp_read_frame(chc__decomp_src *s, chc_err *err)
     uint8_t header[CHC__COMP_HEADER_BYTES];
     rc = chc__read_bytes(s->raw, header, CHC__COMP_HEADER_BYTES, err);
     if (rc) return rc;
-    uint8_t  method = header[0];
-    uint32_t comp_with_hdr =
-          (uint32_t) header[1]        | ((uint32_t) header[2] << 8)
-        | ((uint32_t) header[3] << 16) | ((uint32_t) header[4] << 24);
-    uint32_t orig =
-          (uint32_t) header[5]        | ((uint32_t) header[6] << 8)
-        | ((uint32_t) header[7] << 16) | ((uint32_t) header[8] << 24);
+    uint8_t method = header[0];
+    uint32_t comp_with_hdr, orig;
+    memcpy(&comp_with_hdr, header + 1, sizeof comp_with_hdr);
+    memcpy(&orig, header + 5, sizeof orig);
+    comp_with_hdr = chc__bswap32(comp_with_hdr);
+    orig = chc__bswap32(orig);
     if (comp_with_hdr < CHC__COMP_HEADER_BYTES)
         return chc__err_set(err, CHC_ERR_PROTOCOL,
             "compressed frame too short: %u", comp_with_hdr);
@@ -511,22 +506,12 @@ chc__decomp_io_read(void *ud, void *buf, size_t len, size_t *out_n,
     return CHC_OK;
 }
 
-static int
-chc__decomp_io_write(void *ud, const void *b, size_t n, chc_err *e)
-{ (void) ud; (void) b; (void) n; (void) e; return -1; }
-
 static void
 chc__decomp_src_init(chc__decomp_src *s, chc_in *raw, const chc_codec *codec,
                      const chc_alloc *al, chc_io *out_io)
 {
-    memset(s, 0, sizeof *s);
-    s->raw   = raw;
-    s->codec = codec;
-    s->al    = al;
-    out_io->ud           = s;
-    out_io->read         = chc__decomp_io_read;
-    out_io->write        = chc__decomp_io_write;
-    out_io->check_cancel = NULL;
+    *s = (chc__decomp_src) { .raw = raw, .codec = codec, .al = al };
+    *out_io = (chc_io) { .ud = s, .read = chc__decomp_io_read };
 }
 
 static void

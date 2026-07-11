@@ -56,9 +56,8 @@ void chc_openssl_io_set_deadline(chc_openssl_io *state, int64_t deadline_us);
 #include <openssl/ssl.h>
 
 static int
-chc__openssl_fail(chc_err *err, SSL *ssl, int ret, int ssl_err, const char *op)
+chc__openssl_fail(chc_err *err, int ret, int ssl_err, const char *op)
 {
-    (void) ssl;
     const char *what = "I/O error";
     char detail[160] = "";
     switch (ssl_err) {
@@ -140,7 +139,7 @@ chc__openssl_read(void *ud, void *buf, size_t len, size_t *out_n, chc_err *err)
         if (e == SSL_ERROR_ZERO_RETURN) { *out_n = 0; return CHC_OK; }
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) continue;
         if (e == SSL_ERROR_SYSCALL && errno == EINTR) continue;
-        return chc__openssl_fail(err, s->ssl, n, e, "SSL_read");
+        return chc__openssl_fail(err, n, e, "SSL_read");
     }
 }
 
@@ -160,7 +159,7 @@ chc__openssl_write(void *ud, const void *buf, size_t len, chc_err *err)
         int e = SSL_get_error(s->ssl, n);
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) continue;
         if (e == SSL_ERROR_SYSCALL && errno == EINTR) continue;
-        return chc__openssl_fail(err, s->ssl, n, e, "SSL_write");
+        return chc__openssl_fail(err, n, e, "SSL_write");
     }
     return CHC_OK;
 }
@@ -169,21 +168,20 @@ static int
 chc__openssl_cancel(void *ud)
 {
     chc_openssl_io *s = ud;
-    return s->check_cancel ? (s->check_cancel(s->cancel_ud) ? 1 : 0) : 0;
+    return s->check_cancel && s->check_cancel(s->cancel_ud);
 }
 
 void
 chc_openssl_io_init(chc_openssl_io *state, chc_io *out_io, SSL *ssl,
                     bool (*check_cancel)(void *), void *cancel_ud)
 {
-    state->ssl          = ssl;
-    state->check_cancel = check_cancel;
-    state->cancel_ud    = cancel_ud;
-    state->deadline_us  = 0;
-    out_io->ud           = state;
-    out_io->read         = chc__openssl_read;
-    out_io->write        = chc__openssl_write;
-    out_io->check_cancel = check_cancel ? chc__openssl_cancel : NULL;
+    *state = (chc_openssl_io) {
+        .ssl = ssl, .check_cancel = check_cancel, .cancel_ud = cancel_ud,
+    };
+    *out_io = (chc_io) {
+        .ud = state, .read = chc__openssl_read, .write = chc__openssl_write,
+        .check_cancel = check_cancel ? chc__openssl_cancel : NULL,
+    };
 }
 
 void
