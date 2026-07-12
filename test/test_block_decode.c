@@ -865,6 +865,8 @@ static void test_type_parse_roundtrip(void) {
         "Decimal64(4)",
         "Enum8('a' = 1, 'b' = 2)",
         "UUID",
+        "UUID2",
+        "UUID1",
         "IPv4",
         "IPv6",
         "Object('json')",
@@ -921,14 +923,11 @@ static void test_invalid_array_overflow(void) {
         0x02,0,0,0,0,0,0,0x20,               /* offsets[0] = 0x2000000000000002 */
         0,0,0,0,                             /* trailing string-length varuints */
     };
-    test_mem_src m;
-    chc_io io;
-    test_mem_src_init(&m, &io, bytes, sizeof bytes);
     chc_alloc al = chc_alloc_stdlib();
     chc_block_opts opts = {};
     chc_block *b = NULL;
     chc_err err = {};
-    int rc = test_block_read_io(&io, &al, &opts, &b, &err);
+    int rc = test_block_read_mem(bytes, sizeof bytes, &al, &opts, &b, &err);
     CHECK(rc == CHC_ERR_PROTOCOL);
     CHECK(b == NULL);
     CHECK(strstr(err.msg, "too large") != NULL);
@@ -1074,14 +1073,11 @@ static void test_qbit_decode(void) {
         for (int p = 0; p < 32; p++)
             buf[n++] = (p >= 2 && p <= 8) ? 0x01 : 0x00;
 
-        test_mem_src m;
-        chc_io io;
-        test_mem_src_init(&m, &io, buf, n);
         chc_alloc al = chc_alloc_stdlib();
         chc_block_opts opts = {};
         chc_block *b = NULL;
         chc_err err = {};
-        int rc = test_block_read_io(&io, &al, &opts, &b, &err);
+        int rc = test_block_read_mem(buf, n, &al, &opts, &b, &err);
         CHECK(rc == CHC_OK);
         CHECK(b != NULL);
         if (b) {
@@ -1123,14 +1119,11 @@ static void test_qbit_decode(void) {
         size_t body0 = n;
         for (int k = 0; k < 32; k++) buf[n++] = (uint8_t) k;   /* 16 planes x 2 */
 
-        test_mem_src m;
-        chc_io io;
-        test_mem_src_init(&m, &io, buf, n);
         chc_alloc al = chc_alloc_stdlib();
         chc_block_opts opts = {};
         chc_block *b = NULL;
         chc_err err = {};
-        int rc = test_block_read_io(&io, &al, &opts, &b, &err);
+        int rc = test_block_read_mem(buf, n, &al, &opts, &b, &err);
         CHECK(rc == CHC_OK);
         CHECK(b != NULL);
         if (b) {
@@ -1150,6 +1143,60 @@ static void test_qbit_decode(void) {
     }
 }
 
+/* Crafted-bytes decode. 16 canonical big-endian bytes (no half-swap);
+ * decoder must pass them through as-is. */
+static void test_uuid2_decode(void) {
+    current_test = "uuid2_decode";
+
+    /* '550e8400-e29b-41d4-a716-446655440000' as UUID2 = canonical bytes */
+    static const uint8_t canon[16] = {
+        0x55,0x0e,0x84,0x00,0xe2,0x9b,0x41,0xd4,
+        0xa7,0x16,0x44,0x66,0x55,0x44,0x00,0x00};
+    uint8_t buf[64];
+    size_t n = 0;
+    buf[n++] = 0x01;                       /* n_columns = 1 */
+    buf[n++] = 0x01;                       /* n_rows    = 1 */
+    buf[n++] = 0x01; buf[n++] = 'u';       /* name "u"      */
+    buf[n++] = 0x05;
+    memcpy(buf + n, "UUID2", 5); n += 5;
+    memcpy(buf + n, canon, 16); n += 16;
+
+    chc_alloc al = chc_alloc_stdlib();
+    chc_block_opts opts = {};
+    chc_block *b = NULL;
+    chc_err err = {};
+    int rc = test_block_read_mem(buf, n, &al, &opts, &b, &err);
+    CHECK(rc == CHC_OK);
+    CHECK(b != NULL);
+    if (b) {
+        const chc_type *t = chc_block_column_type(b, 0);
+        CHECK_EQ_I64(chc_type_kind(t), CHC_UUID2);
+        CHECK_EQ_U64(chc_type_elem_size(t), 16);
+
+        const chc_column *c = chc_block_column(b, 0);
+        CHECK(chc_column_layout(c) == CHC_COL_FIXED);
+        size_t es;
+        const uint8_t *d = chc_column_fixed_data(c, &es);
+        CHECK_EQ_U64(es, 16);
+        if (memcmp(d, canon, 16) != 0) {
+            fprintf(stderr, "%s: canonical bytes mangled\n", current_test);
+            fail_count++;
+        }
+        free_block(b);
+    }
+
+    {
+        chc_type *t = NULL;
+        chc_err perr = {};
+        int prc = chc_type_parse("UUID1", 5, &al, &t, &perr);
+        CHECK(prc == CHC_OK);
+        if (t) {
+            CHECK_EQ_I64(chc_type_kind(t), CHC_UUID);
+            chc_type_destroy(t, &al);
+        }
+    }
+}
+
 int main(void) {
     test_type_parse_roundtrip();
     test_named_tuple_parser();
@@ -1163,6 +1210,7 @@ int main(void) {
     test_map();
     test_decimal();
     test_uuid();
+    test_uuid2_decode();
     test_nothing();
     test_date_widths();
     test_point();

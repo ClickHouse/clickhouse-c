@@ -175,7 +175,7 @@ typedef enum chc_kind {
     CHC_TIME, CHC_TIME64,
     CHC_STRING, CHC_FIXED_STRING,
     CHC_DECIMAL32, CHC_DECIMAL64, CHC_DECIMAL128, CHC_DECIMAL256,
-    CHC_UUID, CHC_IPV4, CHC_IPV6,
+    CHC_UUID, CHC_UUID2, CHC_IPV4, CHC_IPV6,
     CHC_ENUM8, CHC_ENUM16,
     CHC_NULLABLE, CHC_ARRAY, CHC_TUPLE, CHC_MAP, CHC_NESTED,
     CHC_LOW_CARDINALITY,
@@ -1239,6 +1239,7 @@ static const struct chc__name_row chc__name_table[CHC__NAME_TABLE_M] = {
     [  2] = {"Ring", CHC_RING},
     [  6] = {"Tuple", CHC_TUPLE},
     [  9] = {"IntervalHour", CHC_INTERVAL},
+    [ 21] = {"UUID2", CHC_UUID2},
     [ 27] = {"UInt8", CHC_UINT8},
     [ 29] = {"Nothing", CHC_NOTHING},
     [ 36] = {"Object", CHC_OBJECT},
@@ -1276,6 +1277,7 @@ static const struct chc__name_row chc__name_table[CHC__NAME_TABLE_M] = {
     [139] = {"Date32", CHC_DATE32},
     [141] = {"IPv6", CHC_IPV6},
     [142] = {"Point", CHC_POINT},
+    [150] = {"UUID1", CHC_UUID},
     [151] = {"IntervalMonth", CHC_INTERVAL},
     [153] = {"Time", CHC_TIME},
     [154] = {"Float32", CHC_FLOAT32},
@@ -1879,7 +1881,7 @@ chc_type_elem_size(const chc_type *t)
     case CHC_FLOAT64: case CHC_DECIMAL64: case CHC_TIME64:
     case CHC_INTERVAL:                                              return 8;
     case CHC_INT128: case CHC_UINT128: case CHC_DECIMAL128:
-    case CHC_UUID: case CHC_IPV6:                                   return 16;
+    case CHC_UUID: case CHC_UUID2: case CHC_IPV6:                   return 16;
     case CHC_INT256: case CHC_UINT256: case CHC_DECIMAL256:         return 32;
     case CHC_ENUM8:                                                 return 1;
     case CHC_FIXED_STRING:                                          return (size_t) t->fixed_string.n;

@@ -123,6 +123,16 @@ test_block_read_io(chc_io *io, const chc_alloc *al, const chc_block_opts *opts,
 }
 
 CHC_MAYBE_UNUSED static int
+test_block_read_mem(const void *data, size_t len, const chc_alloc *al,
+                    const chc_block_opts *opts, chc_block **out, chc_err *err)
+{
+    test_mem_src src;
+    chc_io io;
+    test_mem_src_init(&src, &io, data, len);
+    return test_block_read_io(&io, al, opts, out, err);
+}
+
+CHC_MAYBE_UNUSED static int
 test_mem_sink_write(void *ud, const void *buf, size_t n, chc_err *err)
 {
     test_mem_sink *s = ud;
