@@ -245,6 +245,23 @@ typedef enum chc_col_kind {
 
 typedef struct chc_column chc_column;
 
+/* Column tree. Reader allocates & owns instances, freed by chc_block_destroy.
+ * chc_build_* initializes caller-owned instances, usually on stack, over
+ * caller slabs. Pointers use host byte order; writer converts to LE on BE
+ * hosts. Access through helpers below or fields directly */
+struct chc_column {
+    chc_col_kind layout;
+    size_t       n_rows;
+    union {
+        struct { void *data; size_t elem_size; }                              fixed;
+        struct { uint8_t *data; uint64_t *offsets; size_t bytes; }            str;
+        struct { uint8_t *null_map; chc_column *inner; }                      nullable;
+        struct { uint64_t *offsets; chc_column *values; }                     array;
+        struct { chc_column **children; size_t arity; }                       tuple;
+        struct { int key_size; void *keys; chc_column *dict; size_t dict_n; } lc;
+    };
+};
+
 chc_col_kind chc_column_layout(const chc_column *c);
 size_t       chc_column_n_rows(const chc_column *c);
 
@@ -339,124 +356,67 @@ int32_t chc_block_bucket_num(const chc_block *b);
 /* Block writer                                                               */
 /* -------------------------------------------------------------------------- */
 
-typedef struct chc_block_builder chc_block_builder;
+/* Block column: name, full CH type & column tree. Build tree with chc_build_*
+ * or reuse reader output for round-trip. Tree stays caller-owned & must
+ * outlive write */
+typedef struct {
+    const char       *name;
+    size_t            name_len;
+    const chc_type   *type;
+    const chc_column *col;
+} chc_block_col;
 
-CHC_NODISCARD int  chc_block_builder_init(chc_block_builder **out, const chc_alloc *al,
-                            chc_err *err);
-void chc_block_builder_destroy(chc_block_builder *bb);
+/* Stack builder over caller-provided chc_block_col storage. Initialize with the
+ * array, append columns, then call chc_block_write. Caller sizes the array;
+ * appending more columns than it holds is undefined. Skip builder by passing an
+ * array directly to chc_block_write_cols */
+typedef struct chc_block_builder {
+    chc_block_col *cols;      /* caller-owned storage */
+    size_t         n_cols;
+    size_t         n_rows;    /* shared across columns */
+} chc_block_builder;
 
-/* For variable-length columns, offsets[i] is the cumulative end of row i
- * (exclusive ends, host byte order). For fixed columns, data is n_rows *
- * elem_size little-endian bytes. None of the slabs are copied; they must
- * outlive chc_block_write. */
-CHC_NODISCARD int  chc_block_builder_append_fixed(chc_block_builder *bb,
-                                    const char *name, size_t name_len,
-                                    const chc_type *t,
-                                    const void *data, size_t n_rows,
-                                    chc_err *err);
+void chc_block_builder_init(chc_block_builder *bb, chc_block_col *cols);
 
-CHC_NODISCARD int  chc_block_builder_append_string(chc_block_builder *bb,
-                                     const char *name, size_t name_len,
-                                     const uint64_t *offsets,
-                                     const uint8_t *data, size_t n_rows,
-                                     chc_err *err);
-
-/* Composite append helpers. Slabs stay caller-owned; the builder never
- * copies. Offsets / keys are host byte order; the writer byte-swaps to
- * little-endian on BE hosts. `t` carries the column's full CH type and
- * must match the helper variant (e.g. _nullable_fixed expects
- * Nullable(<fixed>), _array_string expects Array(String), and
- * _low_cardinality_string expects LowCardinality(String) or
- * LowCardinality(Nullable(String))).
+/* Build column trees over caller-owned slabs without copying. Children must
+ * outlive write. Nest constructors to match any composite reader emits, e.g.
+ * Array(LowCardinality(Nullable(String))):
  *
- * Nested arrays (Array(Array(T))) and Tuple columns are not exposed yet —
- * add when a consumer asks. */
-CHC_NODISCARD int  chc_block_builder_append_nullable_fixed(
-        chc_block_builder *bb,
-        const char *name, size_t name_len,
-        const chc_type *t,
-        const uint8_t *null_map,
-        const void    *inner_data,
-        size_t         n_rows, chc_err *err);
+ *   chc_column d = chc_build_string(dict_offs, dict_data, dict_n);
+ *   chc_column n = chc_build_nullable(dict_null_map, &d);
+ *   chc_column l = chc_build_lc(key_size, keys, leaf_rows, &n);
+ *   chc_column a = chc_build_array(offsets, n_rows, &l);
+ *   chc_block_builder_append(bb, "c", 1, t, &a);
+ *
+ * Each node stores row count for its level. Fixed, string, array & LC builders
+ * receive it explicitly; nullable & tuple builders derive it from children.
+ * Array leaf count equals offsets[n_rows - 1]; LC leaf count equals key count.
+ * Fixed data contains n_rows * elem_size LE bytes; string offsets contain
+ * cumulative exclusive ends. For LC(Nullable(T)), supply inner-typed dict
+ * with null sentinel at slot 0 or Nullable wrapper. Plain String, FixedString,
+ * JSON & Object need one matching chc_build_fixed or chc_build_string */
+chc_column chc_build_fixed(const void *data, size_t elem_size, size_t n_rows);
+chc_column chc_build_string(const uint64_t *offsets, const uint8_t *data,
+                            size_t n_rows);
+chc_column chc_build_nullable(const uint8_t *null_map, chc_column *inner);
+chc_column chc_build_array(const uint64_t *offsets, size_t n_rows,
+                           chc_column *values);
+chc_column chc_build_tuple(chc_column **children, size_t arity);
+chc_column chc_build_lc(int key_size, const void *keys, size_t n_rows,
+                        chc_column *dict);
 
-CHC_NODISCARD int  chc_block_builder_append_nullable_string(
-        chc_block_builder *bb,
-        const char *name, size_t name_len,
-        const chc_type *t,
-        const uint8_t  *null_map,
-        const uint64_t *inner_offsets,
-        const uint8_t  *inner_data,
-        size_t          n_rows, chc_err *err);
+/* Append column. `t` gives full CH type; `col` must match structurally & share
+ * the block row count, both checked during write. Caller must not exceed the
+ * storage passed to chc_block_builder_init */
+void chc_block_builder_append(chc_block_builder *bb,
+                     const char *name, size_t name_len,
+                     const chc_type *t, const chc_column *col);
 
-CHC_NODISCARD int  chc_block_builder_append_array_fixed(
-        chc_block_builder *bb,
-        const char *name, size_t name_len,
-        const chc_type *t,
-        const uint64_t *offsets,
-        const void     *values,
-        size_t          n_rows, chc_err *err);
-
-CHC_NODISCARD int  chc_block_builder_append_array_string(
-        chc_block_builder *bb,
-        const char *name, size_t name_len,
-        const chc_type *t,
-        const uint64_t *offsets,
-        const uint64_t *values_offsets,
-        const uint8_t  *values_data,
-        size_t          n_rows, chc_err *err);
-
-/* Nested Array(Array(...(<fixed/string>))) variants. `t` is top-level
- * Array type, `ndim` is nesting depth (must match `t`). level_offsets
- * is ndim cumulative-end arrays ordered outer-to-inner, level_offsets_len
- * gives count at each level. n_rows is top-level row count, must equal
- * level_offsets_len[0] */
-CHC_NODISCARD int  chc_block_builder_append_array_nested_fixed(
-        chc_block_builder *bb,
-        const char *name, size_t name_len,
-        const chc_type *t,
-        int                       ndim,
-        const uint64_t * const   *level_offsets,
-        const size_t             *level_offsets_len,
-        const void               *values,
-        size_t                    n_rows, chc_err *err);
-
-CHC_NODISCARD int  chc_block_builder_append_array_nested_string(
-        chc_block_builder *bb,
-        const char *name, size_t name_len,
-        const chc_type *t,
-        int                       ndim,
-        const uint64_t * const   *level_offsets,
-        const size_t             *level_offsets_len,
-        const uint64_t           *values_offsets,
-        const uint8_t            *values_data,
-        size_t                    n_rows, chc_err *err);
-
-/* LowCardinality(String) or LowCardinality(Nullable(String)). For the
- * Nullable variant the caller must place a null-sentinel entry at dict
- * index 0 (CH convention) and use key 0 for null rows. */
-/* JSON column, STRING serialization. `t` must be CHC_JSON. Rows are JSON
- * document text, one per offset; builder emits an 8-byte LE serialization-
- * version prefix (value 1) once before the same wire format as
- * chc_block_builder_append_string. Caller is responsible for the input
- * being valid JSON; server rejects malformed documents at INSERT time. */
-CHC_NODISCARD int  chc_block_builder_append_json_string(
-        chc_block_builder *bb,
-        const char *name, size_t name_len,
-        const chc_type *t,                /* CHC_JSON */
-        const uint64_t *offsets,
-        const uint8_t  *data,
-        size_t n_rows, chc_err *err);
-
-CHC_NODISCARD int  chc_block_builder_append_low_cardinality_string(
-        chc_block_builder *bb,
-        const char *name, size_t name_len,
-        const chc_type *t,
-        int             key_size,
-        const void     *keys,
-        const uint64_t *dict_offsets,
-        const uint8_t  *dict_data,
-        size_t          dict_n,
-        size_t          n_rows, chc_err *err);
+/* Write directly from caller-built columns. Require cols[i].col->n_rows ==
+ * n_rows for every column */
+CHC_NODISCARD int  chc_block_write_cols(chc_io *io, const chc_block_col *cols,
+                     size_t n_cols, size_t n_rows,
+                     const chc_block_opts *opts, chc_err *err);
 
 CHC_NODISCARD int  chc_block_write(chc_io *io, const chc_block_builder *bb,
                      const chc_block_opts *opts, chc_err *err);
@@ -505,9 +465,9 @@ static inline uint64_t chc__bswap64(uint64_t v) {
 
 /* Frozen v1.0.3 variant of CityHash, ported from city.cc.
  * Original: Copyright (c) 2011 Google, Inc. (MIT licence).
- * Short-string path lives here so chc__name_to_kind can reuse it; the
- * 128-bit driver used by compressed-frame checksums sits in
- * clickhouse-compression.h and builds on these helpers. */
+ * Short-string path lives here so chc__name_to_kind can reuse it; 128-bit
+ * compressed-frame checksum driver in clickhouse-compression.h builds on
+ * these helpers */
 
 static uint64_t chc__city_fetch64(const char *p) CHC_REPRODUCIBLE
 {
@@ -795,9 +755,9 @@ chc_in_init_ioless(chc_in *in, const chc_alloc *al)
     return CHC_OK;
 }
 
-/* Drop prefix [0, keep): keep = mark when a checkpoint is live, else pos.
- * consumed counts returned bytes, not offsets, so compaction leaves it be;
- * mark and pos shift together so (pos - mark) survives for rewind. */
+/* Drop prefix [0, keep), using mark while checkpoint is live, otherwise pos.
+ * consumed tracks returned bytes rather than offsets, so compaction leaves it
+ * unchanged; shifting mark & pos preserves pos - mark for rewind */
 static void
 chc__in_compact(chc_in *in)
 {
@@ -853,8 +813,8 @@ chc_in_free(chc_in *in)
     in->buf = NULL;
 }
 
-/* Mark read cursor as rewind target. Ioless checkpoints at a packet
- * boundary so a mid-parse CHC_WOULD_BLOCK can rewind and re-parse once more bytes arrive. */
+/* Mark read cursor for rewind. Ioless mode checkpoints at packet boundaries,
+ * allowing mid-parse CHC_WOULD_BLOCK to rewind & retry after more bytes arrive */
 CHC_MAYBE_UNUSED static void
 chc__in_checkpoint(chc_in *in)
 {
@@ -933,8 +893,8 @@ chc__read_bytes(chc_in *in, void *dst, size_t n, chc_err *err)
      * straight into caller's dst to skip the staging memcpy. Only fires
      * after the staging buf is drained, so buffered-reader invariants
      * (pos, fill, consumed) stay consistent. Disabled in ioless: bypassed
-     * bytes land outside in->buf and can't be rewound, so ioless routes
-     * everything through the (growable) staging buf. */
+     * bytes bypass in->buf & cannot be rewound; ioless routes all reads
+     * through growable staging buf. */
     while (!CHC__IOLESS(in) && n > in->cap) {
         if (in->eof)
             return chc__err_set(err, CHC_ERR_EOF, "short read");
@@ -1561,11 +1521,10 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
             if (!t->temporal.tz) { chc_type_destroy(t, al); return CHC_ERR_OOM; }
             t->temporal.tz_len = s.len;
         } else if (t->kind == CHC_OBJECT) {
-            /* Object('name') -- legacy JSON object syntax. Argument is a
-             * schema identifier (eg 'json'); clickhouse-cpp accepts any
-             * quoted string. Wire format matches CHC_JSON, so we discard
-             * the argument and keep the full source text in t->name for
-             * round-trip & error messages. */
+            /* Object('name'), legacy JSON object syntax. Argument is schema
+             * identifier (eg 'json'); clickhouse-cpp accepts any quoted
+             * string. Discard argument & retain full source text in t->name
+             * for round-trip & errors */
             chc__tok s = chc__eat_tok(lx);
             if (s.kind != CHC__TOK_STRING) {
                 chc_type_destroy(t, al);
@@ -1778,19 +1737,7 @@ chc_type_format(const chc_type *t, char *buf, size_t buf_len)
 }
 
 /* -------- column internals ---------- */
-
-struct chc_column {
-    chc_col_kind layout;
-    size_t       n_rows;
-    union {
-        struct { void *data; size_t elem_size; }                              fixed;
-        struct { uint8_t *data; uint64_t *offsets; size_t bytes; }            str;
-        struct { uint8_t *null_map; chc_column *inner; }                      nullable;
-        struct { uint64_t *offsets; chc_column *values; }                     array;
-        struct { chc_column **children; size_t arity; }                       tuple;
-        struct { int key_size; void *keys; chc_column *dict; size_t dict_n; } lc;
-    };
-};
+/* Public API defines struct chc_column */
 
 chc_col_kind chc_column_layout(const chc_column *c) { return c ? c->layout : (chc_col_kind) 0; }
 size_t       chc_column_n_rows(const chc_column *c) { return c ? c->n_rows : 0; }
@@ -2019,8 +1966,10 @@ chc__col_read_string(chc_in *in, size_t n_rows,
     return CHC_OK;
 }
 
-/* Composite columns might have a prefix sub-stream. Only LowCardinality
- * actually emits one in the formats we handle: a uint64 key version. */
+/* Composite columns might have a prefix sub-stream, emitted for whole
+ * column tree before any body bytes. In formats handled here:
+ * LowCardinality has a uint64 key version, JSON a uint64 serialization
+ * version, legacy Object a uint8 serialization kind */
 static int
 chc__col_read_prefix(chc_in *in, const chc_type *t, chc_err *err)
 {
@@ -2031,6 +1980,31 @@ chc__col_read_prefix(chc_in *in, const chc_type *t, chc_err *err)
         if (v != 1)
             return chc__err_set(err, CHC_ERR_PROTOCOL,
                 "LowCardinality: unexpected key version %llu", (unsigned long long) v);
+        return CHC_OK;
+    }
+    if (t->kind == CHC_JSON) {
+        /* Only STRING (=1) in scope; other versions need the consumer to
+         * set output_format_native_write_json_as_string=1 on the SELECT */
+        uint64_t v;
+        int rc = chc__read_u64_le(in, &v, err);
+        if (rc != CHC_OK) return rc;
+        if (v != 1)
+            return chc__err_set(err, CHC_ERR_TYPE,
+                "unsupported JSON serialization version %llu "
+                "(set output_format_native_write_json_as_string=1)",
+                (unsigned long long) v);
+        return CHC_OK;
+    }
+    if (t->kind == CHC_OBJECT) {
+        /* Legacy Object Native format uses a one-byte kind: TUPLE=0,
+         * STRING=1. Tuple decoding needs its dynamic type descriptor */
+        uint8_t kind;
+        int rc = chc__read_byte(in, &kind, err);
+        if (rc != CHC_OK) return rc;
+        if (kind != 1)
+            return chc__err_set(err, CHC_ERR_TYPE,
+                "unsupported Object serialization kind %u (STRING=1 required)",
+                (unsigned) kind);
         return CHC_OK;
     }
     if (t->kind == CHC_NULLABLE || t->kind == CHC_ARRAY
@@ -2085,27 +2059,11 @@ chc__col_read(chc_in *in, const chc_type *t,
 
     switch (t->kind) {
     case CHC_STRING:
-        return chc__col_read_string(in, n_rows, out, err);
-
     case CHC_JSON:
-    case CHC_OBJECT: {
-        /* JSON / Object('json') stream prefix: 8-byte LE serialization
-         * version (SerializationObject.cpp:275). Only STRING (=1) is in
-         * scope; other versions need the consumer to set
-         * output_format_native_write_json_as_string=1 on the SELECT.
-         * Body bytes per row are writeStringBinary, identical to a String
-         * column — reuse chc__col_read_string and keep CHC_COL_STRING
-         * layout so callers reuse string accessors. */
-        uint64_t version;
-        int rc = chc__read_u64_le(in, &version, err);
-        if (rc != CHC_OK) return rc;
-        if (version != 1)
-            return chc__err_set(err, CHC_ERR_TYPE,
-                "unsupported JSON serialization version %llu "
-                "(set output_format_native_write_json_as_string=1)",
-                (unsigned long long) version);
+    case CHC_OBJECT:
+        /* JSON/Object STRING-mode body rows use writeStringBinary, identical
+         * to String. Prefix lives in chc__col_read_prefix */
         return chc__col_read_string(in, n_rows, out, err);
-    }
 
     case CHC_NULLABLE: {
         if (t->n_children != 1)
@@ -2697,410 +2655,93 @@ chc_block_read(chc_in *in, const chc_alloc *al,
 
 /* -------- block writer ---------- */
 
-typedef enum {
-    CHC__BLD_FIXED               = 1,
-    CHC__BLD_STRING              = 2,
-    CHC__BLD_NULL_FIXED          = 3,
-    CHC__BLD_NULL_STRING         = 4,
-    CHC__BLD_ARRAY_FIXED         = 5,
-    CHC__BLD_ARRAY_STRING        = 6,
-    CHC__BLD_LC_STRING           = 7,
-    CHC__BLD_JSON_STRING         = 8,
-    CHC__BLD_ARRAY_NESTED_FIXED  = 9,
-    CHC__BLD_ARRAY_NESTED_STRING = 10,
-} chc__bld_kind;
-
-typedef struct {
-    const char     *name;
-    size_t          name_len;
-    const chc_type *type;             /* NULL only for legacy STRING entries */
-    chc__bld_kind   kind;
-    size_t          n_rows;
-    size_t          inner_n;          /* element count of the inner array/string/dict body */
-    /* Pointers into caller-owned memory; library never copies. */
-    /* Base representation: fixed-width xor variable-length. */
-    union {
-        struct { const void *data; size_t elem_size; }           fixed;  /* *_FIXED */
-        struct { const uint64_t *offsets; const uint8_t *data; } str;    /* *_STRING / LC dict */
-    };
-    /* Structural modifier over base; absent for plain FIXED / STRING / JSON. */
-    union {
-        struct { const uint8_t *null_map; }    nullable;  /* NULL_* */
-        struct { const uint64_t *offsets; }    array;     /* ARRAY_FIXED / ARRAY_STRING (cumulative ends) */
-        struct {                                          /* ARRAY_NESTED_*, ndim >= 2 */
-            int                     ndim;
-            const uint64_t * const *level_offsets;        /* ndim cumulative-end arrays */
-            const size_t           *level_offsets_len;    /* count per level */
-        } nested;
-        struct { int key_size; const void *keys; } lc;    /* LC_STRING */
-    };
-} chc__col_entry;
-
-struct chc_block_builder {
-    const chc_alloc *al;          /* captured at init */
-    chc__col_entry  *cols;
-    size_t           n_cols;
-    size_t           cap;
-    size_t           n_rows;      /* common across all columns */
-    bool             n_rows_set;
-};
-
-int
-chc_block_builder_init(chc_block_builder **out, const chc_alloc *al,
-                       chc_err *err)
+void
+chc_block_builder_init(chc_block_builder *bb, chc_block_col *cols)
 {
-    chc_block_builder *bb = chc__calloc(al, sizeof *bb, err);
-    if (!bb) return CHC_ERR_OOM;
-    bb->al = al;
-    *out = bb;
-    return CHC_OK;
+    *bb = (chc_block_builder) { .cols = cols };
+}
+
+/* -------- compositional column builders ---------- */
+/* Cast away const for reader-compatible tree shape; writer never mutates
+ * caller trees */
+
+chc_column
+chc_build_fixed(const void *data, size_t elem_size, size_t n_rows)
+{
+    return (chc_column) {
+        .layout = CHC_COL_FIXED,
+        .n_rows = n_rows,
+        .fixed.data = (void *) data,
+        .fixed.elem_size = elem_size,
+    };
+}
+
+chc_column
+chc_build_string(const uint64_t *offsets, const uint8_t *data, size_t n_rows)
+{
+    return (chc_column) {
+        .layout = CHC_COL_STRING,
+        .n_rows = n_rows,
+        .str.offsets = (uint64_t *) offsets,
+        .str.data = (uint8_t *) data,
+    };
+}
+
+chc_column
+chc_build_nullable(const uint8_t *null_map, chc_column *inner)
+{
+    return (chc_column) {
+        .layout = CHC_COL_NULLABLE,
+        .n_rows = inner ? inner->n_rows : 0,
+        .nullable.null_map = (uint8_t *) null_map,
+        .nullable.inner = inner,
+    };
+}
+
+chc_column
+chc_build_array(const uint64_t *offsets, size_t n_rows, chc_column *values)
+{
+    return (chc_column) {
+        .layout = CHC_COL_ARRAY,
+        .n_rows = n_rows,
+        .array.offsets = (uint64_t *) offsets,
+        .array.values = values,
+    };
+}
+
+chc_column
+chc_build_tuple(chc_column **children, size_t arity)
+{
+    return (chc_column) {
+        .layout = CHC_COL_TUPLE,
+        .n_rows = arity ? children[0]->n_rows : 0,
+        .tuple.children = children,
+        .tuple.arity = arity,
+    };
+}
+
+chc_column
+chc_build_lc(int key_size, const void *keys, size_t n_rows, chc_column *dict)
+{
+    return (chc_column) {
+        .layout = CHC_COL_LOW_CARDINALITY,
+        .n_rows = n_rows,
+        .lc.key_size = key_size,
+        .lc.keys = (void *) keys,
+        .lc.dict = dict,
+        .lc.dict_n = dict ? dict->n_rows : 0,
+    };
 }
 
 void
-chc_block_builder_destroy(chc_block_builder *bb)
+chc_block_builder_append(chc_block_builder *bb,
+                         const char *name, size_t name_len,
+                         const chc_type *t, const chc_column *col)
 {
-    if (!bb) return;
-    const chc_alloc *al = bb->al;
-    al->free(al->ud, bb->cols, bb->cap * sizeof *bb->cols);
-    al->free(al->ud, bb, sizeof *bb);
-}
-
-static int
-chc__bld_grow(chc_block_builder *bb, chc_err *err)
-{
-    if (bb->n_cols < bb->cap) return CHC_OK;
-    size_t new_cap = bb->cap ? bb->cap * 2 : 4;
-    chc__col_entry *p = chc__realloc(bb->al, bb->cols,
-                                     bb->cap * sizeof *bb->cols,
-                                     new_cap * sizeof *bb->cols, err);
-    if (!p) return CHC_ERR_OOM;
-    bb->cols = p;
-    bb->cap = new_cap;
-    return CHC_OK;
-}
-
-static int
-chc__bld_check_rows(chc_block_builder *bb, size_t n_rows, chc_err *err)
-{
-    if (!bb->n_rows_set) { bb->n_rows = n_rows; bb->n_rows_set = true; return CHC_OK; }
-    if (bb->n_rows != n_rows)
-        return chc__err_set(err, CHC_ERR_USAGE,
-            "block_builder: row count mismatch (%zu vs %zu)", bb->n_rows, n_rows);
-    return CHC_OK;
-}
-
-static int
-chc__bld_add(chc_block_builder *bb, const char *name, size_t name_len,
-             const chc_type *type, chc__bld_kind kind, size_t n_rows,
-             chc__col_entry **out, chc_err *err)
-{
-    int rc = chc__bld_check_rows(bb, n_rows, err);
-    if (rc != CHC_OK) return rc;
-    rc = chc__bld_grow(bb, err);
-    if (rc != CHC_OK) return rc;
-    chc__col_entry *e = &bb->cols[bb->n_cols++];
-    *e = (chc__col_entry) {
-        .name = name, .name_len = name_len, .type = type,
-        .kind = kind, .n_rows = n_rows,
+    bb->n_rows = col->n_rows;
+    bb->cols[bb->n_cols++] = (chc_block_col) {
+        .name = name, .name_len = name_len, .type = t, .col = col,
     };
-    *out = e;
-    return CHC_OK;
-}
-
-int
-chc_block_builder_append_fixed(chc_block_builder *bb,
-                               const char *name, size_t name_len,
-                               const chc_type *t,
-                               const void *data, size_t n_rows,
-                               chc_err *err)
-{
-    size_t es = chc_type_elem_size(t);
-    if (!es) return chc__err_set(err, CHC_ERR_TYPE,
-        "append_fixed: type is not fixed-size");
-    chc__col_entry *e;
-    int rc = chc__bld_add(bb, name, name_len, t, CHC__BLD_FIXED,
-                          n_rows, &e, err);
-    if (rc != CHC_OK) return rc;
-    e->fixed.data = data;
-    e->fixed.elem_size = es;
-    return CHC_OK;
-}
-
-int
-chc_block_builder_append_string(chc_block_builder *bb,
-                                const char *name, size_t name_len,
-                                const uint64_t *offsets,
-                                const uint8_t *data, size_t n_rows,
-                                chc_err *err)
-{
-    chc__col_entry *e;
-    int rc = chc__bld_add(bb, name, name_len, NULL, CHC__BLD_STRING,
-                          n_rows, &e, err);
-    if (rc != CHC_OK) return rc;
-    e->str.offsets = offsets;
-    e->str.data = data;
-    e->inner_n = n_rows;
-    return CHC_OK;
-}
-
-/* Extract the inner fixed-elem size from a Nullable(<fixed>) /
- * Array(<fixed>) type. 0 if `t` is not the expected shape. */
-static size_t
-chc__bld_inner_fixed_size(const chc_type *t, chc_kind outer)
-{
-    if (!t || t->kind != outer || t->n_children != 1) return 0;
-    return chc_type_elem_size(t->children[0]);
-}
-
-/* True iff `t` is Array(String) / Nullable(String). */
-static bool
-chc__bld_inner_is_string(const chc_type *t, chc_kind outer)
-{
-    return t && t->kind == outer && t->n_children == 1
-        && t->children[0]->kind == CHC_STRING;
-}
-
-/* True iff `t` is LowCardinality(String) or LowCardinality(Nullable(String)). */
-static bool
-chc__bld_lc_inner_is_string(const chc_type *t)
-{
-    if (!t || t->kind != CHC_LOW_CARDINALITY || t->n_children != 1) return false;
-    const chc_type *inner = t->children[0];
-    if (inner->kind == CHC_STRING) return true;
-    if (inner->kind == CHC_NULLABLE && inner->n_children == 1
-        && inner->children[0]->kind == CHC_STRING)
-        return true;
-    return false;
-}
-
-int
-chc_block_builder_append_nullable_fixed(chc_block_builder *bb,
-                                        const char *name, size_t name_len,
-                                        const chc_type *t,
-                                        const uint8_t *null_map,
-                                        const void *inner_data,
-                                        size_t n_rows, chc_err *err)
-{
-    size_t es = chc__bld_inner_fixed_size(t, CHC_NULLABLE);
-    if (!es) return chc__err_set(err, CHC_ERR_TYPE,
-        "append_nullable_fixed: type is not Nullable(<fixed>)");
-    chc__col_entry *e;
-    int rc = chc__bld_add(bb, name, name_len, t, CHC__BLD_NULL_FIXED,
-                          n_rows, &e, err);
-    if (rc != CHC_OK) return rc;
-    e->nullable.null_map = null_map;
-    e->fixed.data = inner_data;
-    e->fixed.elem_size = es;
-    return CHC_OK;
-}
-
-int
-chc_block_builder_append_nullable_string(chc_block_builder *bb,
-                                         const char *name, size_t name_len,
-                                         const chc_type *t,
-                                         const uint8_t *null_map,
-                                         const uint64_t *inner_offsets,
-                                         const uint8_t *inner_data,
-                                         size_t n_rows, chc_err *err)
-{
-    if (!chc__bld_inner_is_string(t, CHC_NULLABLE))
-        return chc__err_set(err, CHC_ERR_TYPE,
-            "append_nullable_string: type is not Nullable(String)");
-    chc__col_entry *e;
-    int rc = chc__bld_add(bb, name, name_len, t, CHC__BLD_NULL_STRING,
-                          n_rows, &e, err);
-    if (rc != CHC_OK) return rc;
-    e->nullable.null_map = null_map;
-    e->str.offsets = inner_offsets;
-    e->str.data = inner_data;
-    e->inner_n = n_rows;
-    return CHC_OK;
-}
-
-int
-chc_block_builder_append_array_fixed(chc_block_builder *bb,
-                                     const char *name, size_t name_len,
-                                     const chc_type *t,
-                                     const uint64_t *offsets,
-                                     const void *values,
-                                     size_t n_rows, chc_err *err)
-{
-    size_t es = chc__bld_inner_fixed_size(t, CHC_ARRAY);
-    if (!es) return chc__err_set(err, CHC_ERR_TYPE,
-        "append_array_fixed: type is not Array(<fixed>)");
-    chc__col_entry *e;
-    int rc = chc__bld_add(bb, name, name_len, t, CHC__BLD_ARRAY_FIXED,
-                          n_rows, &e, err);
-    if (rc != CHC_OK) return rc;
-    e->array.offsets = offsets;
-    e->fixed.data = values;
-    e->fixed.elem_size = es;
-    e->inner_n = n_rows ? (size_t) offsets[n_rows - 1] : 0;
-    return CHC_OK;
-}
-
-int
-chc_block_builder_append_array_string(chc_block_builder *bb,
-                                      const char *name, size_t name_len,
-                                      const chc_type *t,
-                                      const uint64_t *offsets,
-                                      const uint64_t *values_offsets,
-                                      const uint8_t *values_data,
-                                      size_t n_rows, chc_err *err)
-{
-    if (!chc__bld_inner_is_string(t, CHC_ARRAY))
-        return chc__err_set(err, CHC_ERR_TYPE,
-            "append_array_string: type is not Array(String)");
-    chc__col_entry *e;
-    int rc = chc__bld_add(bb, name, name_len, t, CHC__BLD_ARRAY_STRING,
-                          n_rows, &e, err);
-    if (rc != CHC_OK) return rc;
-    e->array.offsets = offsets;
-    e->str.offsets = values_offsets;
-    e->str.data = values_data;
-    e->inner_n = n_rows ? (size_t) offsets[n_rows - 1] : 0;
-    return CHC_OK;
-}
-
-/* Walk past ndim Array(...) layers, return leaf type or NULL on
- * shape mismatch */
-static const chc_type *
-chc__bld_array_leaf(const chc_type *t, int ndim)
-{
-    while (ndim-- > 0) {
-        if (!t || t->kind != CHC_ARRAY || t->n_children != 1) return NULL;
-        t = t->children[0];
-    }
-    return t;
-}
-
-int
-chc_block_builder_append_array_nested_fixed(chc_block_builder *bb,
-                                            const char *name, size_t name_len,
-                                            const chc_type *t,
-                                            int ndim,
-                                            const uint64_t * const *level_offsets,
-                                            const size_t *level_offsets_len,
-                                            const void *values,
-                                            size_t n_rows, chc_err *err)
-{
-    if (ndim < 2)
-        return chc__err_set(err, CHC_ERR_USAGE,
-            "append_array_nested_fixed: ndim must be >= 2");
-    const chc_type *leaf = chc__bld_array_leaf(t, ndim);
-    if (!leaf)
-        return chc__err_set(err, CHC_ERR_TYPE,
-            "append_array_nested_fixed: type does not match ndim");
-    size_t es = chc_type_elem_size(leaf);
-    if (!es)
-        return chc__err_set(err, CHC_ERR_TYPE,
-            "append_array_nested_fixed: leaf is not fixed-size");
-    if (n_rows != level_offsets_len[0])
-        return chc__err_set(err, CHC_ERR_USAGE,
-            "append_array_nested_fixed: n_rows != level_offsets_len[0]");
-    chc__col_entry *e;
-    int rc = chc__bld_add(bb, name, name_len, t,
-                          CHC__BLD_ARRAY_NESTED_FIXED, n_rows, &e, err);
-    if (rc != CHC_OK) return rc;
-    e->nested.ndim = ndim;
-    e->nested.level_offsets = level_offsets;
-    e->nested.level_offsets_len = level_offsets_len;
-    e->fixed.data = values;
-    e->fixed.elem_size = es;
-    /* inner_n holds leaf element count: last cumulative end of innermost level */
-    {
-        size_t      ilen = level_offsets_len[ndim - 1];
-        e->inner_n = ilen ? (size_t) level_offsets[ndim - 1][ilen - 1] : 0;
-    }
-    return CHC_OK;
-}
-
-int
-chc_block_builder_append_array_nested_string(chc_block_builder *bb,
-                                             const char *name, size_t name_len,
-                                             const chc_type *t,
-                                             int ndim,
-                                             const uint64_t * const *level_offsets,
-                                             const size_t *level_offsets_len,
-                                             const uint64_t *values_offsets,
-                                             const uint8_t *values_data,
-                                             size_t n_rows, chc_err *err)
-{
-    if (ndim < 2)
-        return chc__err_set(err, CHC_ERR_USAGE,
-            "append_array_nested_string: ndim must be >= 2");
-    const chc_type *leaf = chc__bld_array_leaf(t, ndim);
-    if (!leaf || leaf->kind != CHC_STRING)
-        return chc__err_set(err, CHC_ERR_TYPE,
-            "append_array_nested_string: leaf is not String");
-    if (n_rows != level_offsets_len[0])
-        return chc__err_set(err, CHC_ERR_USAGE,
-            "append_array_nested_string: n_rows != level_offsets_len[0]");
-    chc__col_entry *e;
-    int rc = chc__bld_add(bb, name, name_len, t,
-                          CHC__BLD_ARRAY_NESTED_STRING, n_rows, &e, err);
-    if (rc != CHC_OK) return rc;
-    e->nested.ndim = ndim;
-    e->nested.level_offsets = level_offsets;
-    e->nested.level_offsets_len = level_offsets_len;
-    e->str.offsets = values_offsets;
-    e->str.data = values_data;
-    {
-        size_t      ilen = level_offsets_len[ndim - 1];
-        e->inner_n = ilen ? (size_t) level_offsets[ndim - 1][ilen - 1] : 0;
-    }
-    return CHC_OK;
-}
-
-int
-chc_block_builder_append_json_string(chc_block_builder *bb,
-                                     const char *name, size_t name_len,
-                                     const chc_type *t,
-                                     const uint64_t *offsets,
-                                     const uint8_t *data,
-                                     size_t n_rows, chc_err *err)
-{
-    if (!t || t->kind != CHC_JSON)
-        return chc__err_set(err, CHC_ERR_TYPE,
-            "append_json_string requires CHC_JSON type, got %d",
-            (int) (t ? t->kind : 0));
-    chc__col_entry *e;
-    int rc = chc__bld_add(bb, name, name_len, t, CHC__BLD_JSON_STRING,
-                          n_rows, &e, err);
-    if (rc != CHC_OK) return rc;
-    e->str.offsets = offsets;
-    e->str.data = data;
-    e->inner_n = n_rows;
-    return CHC_OK;
-}
-
-int
-chc_block_builder_append_low_cardinality_string(chc_block_builder *bb,
-                                                const char *name, size_t name_len,
-                                                const chc_type *t,
-                                                int key_size,
-                                                const void *keys,
-                                                const uint64_t *dict_offsets,
-                                                const uint8_t *dict_data,
-                                                size_t dict_n,
-                                                size_t n_rows, chc_err *err)
-{
-    if (!chc__bld_lc_inner_is_string(t))
-        return chc__err_set(err, CHC_ERR_TYPE,
-            "append_low_cardinality_string: type is not LowCardinality(String) or LowCardinality(Nullable(String))");
-    if (key_size != 1 && key_size != 2 && key_size != 4 && key_size != 8)
-        return chc__err_set(err, CHC_ERR_USAGE,
-            "append_low_cardinality_string: key_size must be 1/2/4/8 (got %d)", key_size);
-    chc__col_entry *e;
-    int rc = chc__bld_add(bb, name, name_len, t, CHC__BLD_LC_STRING,
-                          n_rows, &e, err);
-    if (rc != CHC_OK) return rc;
-    e->lc.key_size = key_size;
-    e->lc.keys = keys;
-    e->str.offsets = dict_offsets;
-    e->str.data = dict_data;
-    e->inner_n = dict_n;
-    return CHC_OK;
 }
 
 /* -------- write helpers ---------- */
@@ -3230,94 +2871,205 @@ chc__write_string_body(chc_io *io, const uint64_t *offsets,
     return CHC_OK;
 }
 
-/* Emit the entry's column body (no prefix). Assumes n_rows > 0. */
+/* -------- recursive column writer ---------- */
+
 static int
-chc__bld_write_body(chc_io *io, const chc__col_entry *e, chc_err *err)
+chc__col_write_mismatch(chc_err *err, const chc_type *t)
+{
+    size_t nl;
+    const char *nm = chc_type_name(t, &nl);
+    return chc__err_set(err, CHC_ERR_TYPE,
+        "column layout does not match type %.*s", (int) nl, nm ? nm : "");
+}
+
+/* Emit stream prefix before column bodies, mirroring chc__col_read_prefix:
+ * LowCardinality key version 1, JSON serialization version 1, legacy Object
+ * serialization kind 1. Recurse through composites */
+static int
+chc__col_write_prefix(chc_io *io, const chc_type *t, chc_err *err)
+{
+    if (t->kind == CHC_LOW_CARDINALITY || t->kind == CHC_JSON)
+        return chc__write_u64_le(io, 1, err);
+    if (t->kind == CHC_OBJECT) {
+        uint8_t kind = 1;
+        return chc__write_bytes(io, &kind, 1, err);
+    }
+    if (t->kind == CHC_NULLABLE || t->kind == CHC_ARRAY
+        || t->kind == CHC_TUPLE || t->kind == CHC_MAP
+        || t->kind == CHC_SIMPLE_AGGREGATE_FUNCTION) {
+        for (size_t i = 0; i < t->n_children; i++) {
+            int rc = chc__col_write_prefix(io, t->children[i], err);
+            if (rc != CHC_OK) return rc;
+        }
+    }
+    return CHC_OK;
+}
+
+static int chc__col_write(chc_io *io, const chc_column *c, const chc_type *t,
+                          chc_err *err);
+
+/* Encode geo types as nested Arrays over Tuple(Float64, Float64), mirroring
+ * chc__col_read_geo: 0 Point, 1 Ring, 2 Polygon, 3 MultiPolygon */
+static int
+chc__col_write_geo(chc_io *io, const chc_column *c, int depth, chc_err *err)
 {
     int rc;
-    switch (e->kind) {
-    case CHC__BLD_FIXED:
-        if (e->fixed.elem_size)
-            return chc__write_bytes(io, e->fixed.data,
-                                    e->n_rows * e->fixed.elem_size, err);
+    if (depth == 0) {
+        if (c->layout != CHC_COL_TUPLE || c->tuple.arity != 2)
+            return chc__err_set(err, CHC_ERR_TYPE, "Point: expected Tuple arity 2");
+        for (int i = 0; i < 2; i++) {
+            const chc_column *ch = c->tuple.children[i];
+            if (ch->layout != CHC_COL_FIXED)
+                return chc__err_set(err, CHC_ERR_TYPE, "Point: expected Float64 coords");
+            if (c->n_rows && (rc = chc__write_bytes(io, ch->fixed.data,
+                                                    c->n_rows * 8, err))) return rc;
+        }
         return CHC_OK;
+    }
+    if (c->layout != CHC_COL_ARRAY)
+        return chc__err_set(err, CHC_ERR_TYPE, "geo: expected Array layer");
+    if ((rc = chc__write_u64_le_array(io, c->array.offsets, c->n_rows, err))) return rc;
+    return chc__col_write_geo(io, c->array.values, depth - 1, err);
+}
 
-    case CHC__BLD_STRING:
-    case CHC__BLD_JSON_STRING:
-        return chc__write_string_body(io, e->str.offsets, e->str.data,
-                                      e->n_rows, err);
-
-    case CHC__BLD_NULL_FIXED:
-        if ((rc = chc__write_bytes(io, e->nullable.null_map, e->n_rows, err))) return rc;
-        if (e->fixed.elem_size)
-            return chc__write_bytes(io, e->fixed.data,
-                                    e->n_rows * e->fixed.elem_size, err);
+/* Emit body from chc_column tree. Each node carries row count for its level.
+ * Assume top-level block contains rows */
+static int
+chc__col_write(chc_io *io, const chc_column *c, const chc_type *t, chc_err *err)
+{
+    int rc;
+    size_t es = chc_type_elem_size(t);
+    if (es) {
+        if (c->layout != CHC_COL_FIXED) return chc__col_write_mismatch(err, t);
+        if (c->n_rows)
+            return chc__write_bytes(io, c->fixed.data, c->n_rows * es, err);
         return CHC_OK;
+    }
 
-    case CHC__BLD_NULL_STRING:
-        if ((rc = chc__write_bytes(io, e->nullable.null_map, e->n_rows, err))) return rc;
-        return chc__write_string_body(io, e->str.offsets, e->str.data,
-                                      e->n_rows, err);
+    switch (t->kind) {
+    case CHC_STRING:
+    case CHC_JSON:
+    case CHC_OBJECT:
+        if (c->layout != CHC_COL_STRING) return chc__col_write_mismatch(err, t);
+        return chc__write_string_body(io, c->str.offsets, c->str.data,
+                                      c->n_rows, err);
 
-    case CHC__BLD_ARRAY_FIXED:
-        if ((rc = chc__write_u64_le_array(io, e->array.offsets, e->n_rows, err)))
+    case CHC_NULLABLE:
+        if (c->layout != CHC_COL_NULLABLE || t->n_children != 1)
+            return chc__col_write_mismatch(err, t);
+        if (c->n_rows
+            && (rc = chc__write_bytes(io, c->nullable.null_map, c->n_rows, err)))
             return rc;
-        if (e->inner_n && e->fixed.elem_size)
-            return chc__write_bytes(io, e->fixed.data,
-                                    e->inner_n * e->fixed.elem_size, err);
+        return chc__col_write(io, c->nullable.inner, t->children[0], err);
+
+    case CHC_ARRAY:
+        if (c->layout != CHC_COL_ARRAY || t->n_children != 1)
+            return chc__col_write_mismatch(err, t);
+        if ((rc = chc__write_u64_le_array(io, c->array.offsets, c->n_rows, err)))
+            return rc;
+        return chc__col_write(io, c->array.values, t->children[0], err);
+
+    case CHC_MAP: {
+        if (c->layout != CHC_COL_ARRAY || t->n_children != 2)
+            return chc__col_write_mismatch(err, t);
+        if ((rc = chc__write_u64_le_array(io, c->array.offsets, c->n_rows, err)))
+            return rc;
+        const chc_column *tup = c->array.values;
+        if (!tup || tup->layout != CHC_COL_TUPLE || tup->tuple.arity != 2)
+            return chc__col_write_mismatch(err, t);
+        if ((rc = chc__col_write(io, tup->tuple.children[0], t->children[0], err)))
+            return rc;
+        return chc__col_write(io, tup->tuple.children[1], t->children[1], err);
+    }
+
+    case CHC_TUPLE:
+        if (c->layout != CHC_COL_TUPLE || c->tuple.arity != t->n_children)
+            return chc__col_write_mismatch(err, t);
+        for (size_t i = 0; i < t->n_children; i++)
+            if ((rc = chc__col_write(io, c->tuple.children[i], t->children[i], err)))
+                return rc;
         return CHC_OK;
 
-    case CHC__BLD_ARRAY_STRING:
-        if ((rc = chc__write_u64_le_array(io, e->array.offsets, e->n_rows, err)))
-            return rc;
-        return chc__write_string_body(io, e->str.offsets, e->str.data,
-                                      e->inner_n, err);
-
-    case CHC__BLD_ARRAY_NESTED_FIXED:
-        for (int lvl = 0; lvl < e->nested.ndim; lvl++) {
-            if ((rc = chc__write_u64_le_array(io, e->nested.level_offsets[lvl],
-                                              e->nested.level_offsets_len[lvl], err)))
+    case CHC_QBIT: {
+        size_t bits = chc_type_qbit_element_size(t);
+        if (!bits || t->n_children != 1
+            || c->layout != CHC_COL_TUPLE || c->tuple.arity != bits)
+            return chc__col_write_mismatch(err, t);
+        size_t bytes_per_plane = (chc_type_qbit_dimension(t) + 7) / 8;
+        for (size_t i = 0; i < bits; i++) {
+            const chc_column *pl = c->tuple.children[i];
+            if (pl->layout != CHC_COL_FIXED) return chc__col_write_mismatch(err, t);
+            if (c->n_rows && (rc = chc__write_bytes(io, pl->fixed.data,
+                                                    c->n_rows * bytes_per_plane, err)))
                 return rc;
         }
-        if (e->inner_n && e->fixed.elem_size)
-            return chc__write_bytes(io, e->fixed.data,
-                                    e->inner_n * e->fixed.elem_size, err);
         return CHC_OK;
+    }
 
-    case CHC__BLD_ARRAY_NESTED_STRING:
-        for (int lvl = 0; lvl < e->nested.ndim; lvl++) {
-            if ((rc = chc__write_u64_le_array(io, e->nested.level_offsets[lvl],
-                                              e->nested.level_offsets_len[lvl], err)))
-                return rc;
-        }
-        return chc__write_string_body(io, e->str.offsets, e->str.data,
-                                      e->inner_n, err);
-
-    case CHC__BLD_LC_STRING: {
-        uint64_t flags = 0;
-        switch (e->lc.key_size) {
-        case 1: flags |= 0; break;
-        case 2: flags |= 1; break;
-        case 4: flags |= 2; break;
-        case 8: flags |= 3; break;
+    case CHC_LOW_CARDINALITY: {
+        if (c->layout != CHC_COL_LOW_CARDINALITY || t->n_children != 1)
+            return chc__col_write_mismatch(err, t);
+        /* Empty LC, including one under empty Array, has no body */
+        if (c->n_rows == 0) return CHC_OK;
+        const chc_type *inner = t->children[0];
+        const chc_type *dict_type = (inner->kind == CHC_NULLABLE
+                                     && inner->n_children == 1)
+                                  ? inner->children[0] : inner;
+        /* Reader wraps LC(Nullable) dict in Nullable for caller dispatch. Wire
+         * body contains inner-typed strings with null sentinel at slot 0.
+         * Unwrap before writing */
+        const chc_column *dictc = c->lc.dict;
+        if (dictc && dictc->layout == CHC_COL_NULLABLE)
+            dictc = dictc->nullable.inner;
+        uint64_t flags;
+        switch (c->lc.key_size) {
+        case 1: flags = 0; break;
+        case 2: flags = 1; break;
+        case 4: flags = 2; break;
+        case 8: flags = 3; break;
+        default: return chc__err_set(err, CHC_ERR_USAGE,
+            "LowCardinality: bad key_size %d", c->lc.key_size);
         }
         flags |= CHC__LC_HAS_ADDITIONAL_KEYS;
         flags |= CHC__LC_NEED_UPDATE_DICT;
         if ((rc = chc__write_u64_le(io, flags, err))) return rc;
-        if ((rc = chc__write_u64_le(io, (uint64_t) e->inner_n, err))) return rc;
-        if ((rc = chc__write_string_body(io, e->str.offsets, e->str.data,
-                                         e->inner_n, err))) return rc;
-        if ((rc = chc__write_u64_le(io, (uint64_t) e->n_rows, err))) return rc;
-        return chc__write_keys_array(io, e->lc.keys, e->n_rows,
-                                     e->lc.key_size, err);
+        if ((rc = chc__write_u64_le(io, (uint64_t) c->lc.dict_n, err))) return rc;
+        if ((rc = chc__col_write(io, dictc, dict_type, err))) return rc;
+        if ((rc = chc__write_u64_le(io, (uint64_t) c->n_rows, err))) return rc;
+        return chc__write_keys_array(io, c->lc.keys, c->n_rows,
+                                     c->lc.key_size, err);
     }
+
+    case CHC_SIMPLE_AGGREGATE_FUNCTION:
+        if (t->n_children < 1) return chc__col_write_mismatch(err, t);
+        return chc__col_write(io, c, t->children[t->n_children - 1], err);
+
+    case CHC_POINT:         return chc__col_write_geo(io, c, 0, err);
+    case CHC_RING:          return chc__col_write_geo(io, c, 1, err);
+    case CHC_POLYGON:       return chc__col_write_geo(io, c, 2, err);
+    case CHC_MULTI_POLYGON: return chc__col_write_geo(io, c, 3, err);
+
+    case CHC_NOTHING:
+    case CHC_VOID: {
+        uint8_t zeros[256] = {};
+        size_t left = c->n_rows;
+        while (left) {
+            size_t take = left < sizeof zeros ? left : sizeof zeros;
+            if ((rc = chc__write_bytes(io, zeros, take, err))) return rc;
+            left -= take;
+        }
+        return CHC_OK;
     }
-    return chc__err_set(err, CHC_ERR_USAGE, "unknown builder kind %d", e->kind);
+
+    default:
+        return chc__col_write_mismatch(err, t);
+    }
 }
 
 int
-chc_block_write(chc_io *io, const chc_block_builder *bb,
-                const chc_block_opts *opts, chc_err *err)
+chc_block_write_cols(chc_io *io, const chc_block_col *cols,
+                     size_t n_cols, size_t n_rows,
+                     const chc_block_opts *opts, chc_err *err)
 {
     chc_block_opts def = {};
     if (!opts) opts = &def;
@@ -3327,28 +3079,30 @@ chc_block_write(chc_io *io, const chc_block_builder *bb,
         if (rc != CHC_OK) return rc;
     }
 
-    size_t n_rows = bb->n_rows_set ? bb->n_rows : 0;
-    int rc = chc__write_varuint(io, (uint64_t) bb->n_cols, err);
+    int rc = chc__write_varuint(io, (uint64_t) n_cols, err);
     if (rc != CHC_OK) return rc;
     rc = chc__write_varuint(io, (uint64_t) n_rows, err);
     if (rc != CHC_OK) return rc;
 
-    for (size_t i = 0; i < bb->n_cols; i++) {
-        const chc__col_entry *e = &bb->cols[i];
+    for (size_t i = 0; i < n_cols; i++) {
+        const chc_block_col *e = &cols[i];
+        if (!e->type || !e->col)
+            return chc__err_set(err, CHC_ERR_USAGE,
+                "block_write: column %zu has NULL type or tree", i);
+        if (e->col->n_rows != n_rows)
+            return chc__err_set(err, CHC_ERR_USAGE,
+                "block_write: column %zu row count %zu != block %zu",
+                i, e->col->n_rows, n_rows);
+
         rc = chc__write_string(io, e->name, e->name_len, err);
         if (rc != CHC_OK) return rc;
 
-        /* Type name: legacy STRING path has no e->type; emit "String". */
-        if (e->kind == CHC__BLD_STRING && !e->type) {
-            rc = chc__write_string(io, "String", 6, err);
-        } else {
-            char tbuf[256];
-            size_t need = chc_type_format(e->type, tbuf, sizeof tbuf);
-            if (need >= sizeof tbuf)
-                return chc__err_set(err, CHC_ERR_USAGE,
-                    "type name too long for inline buffer");
-            rc = chc__write_string(io, tbuf, need, err);
-        }
+        char tbuf[256];
+        size_t need = chc_type_format(e->type, tbuf, sizeof tbuf);
+        if (need >= sizeof tbuf)
+            return chc__err_set(err, CHC_ERR_USAGE,
+                "type name too long for inline buffer");
+        rc = chc__write_string(io, tbuf, need, err);
         if (rc != CHC_OK) return rc;
 
         if (opts->has_custom_serialization) {
@@ -3357,18 +3111,22 @@ chc_block_write(chc_io *io, const chc_block_builder *bb,
             if (rc != CHC_OK) return rc;
         }
 
-        if (e->n_rows == 0) continue;
+        if (n_rows == 0) continue;
 
-        /* LC and JSON prefixes use version 1. */
-        if (e->kind == CHC__BLD_LC_STRING || e->kind == CHC__BLD_JSON_STRING) {
-            rc = chc__write_u64_le(io, 1, err);
-            if (rc != CHC_OK) return rc;
-        }
-
-        rc = chc__bld_write_body(io, e, err);
+        rc = chc__col_write_prefix(io, e->type, err);
+        if (rc != CHC_OK) return rc;
+        rc = chc__col_write(io, e->col, e->type, err);
         if (rc != CHC_OK) return rc;
     }
     return CHC_OK;
+}
+
+int
+chc_block_write(chc_io *io, const chc_block_builder *bb,
+                const chc_block_opts *opts, chc_err *err)
+{
+    return chc_block_write_cols(io, bb->cols, bb->n_cols,
+                                bb->n_rows, opts, err);
 }
 
 #endif /* CHC_IMPLEMENTATION */

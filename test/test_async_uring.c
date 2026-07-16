@@ -282,7 +282,8 @@ test_uring_insert(loop_ctx *L)
 {
     current_test = suite_label(L, "uring_insert");
     chc_err err = {};
-    chc_block_builder *bb = NULL;
+    chc_block_col bbcols[1];
+    chc_block_builder bb;
     chc_type *tu = NULL;
 
     int rc = chc_async_send_query(L->cli,
@@ -327,10 +328,11 @@ test_uring_insert(loop_ctx *L)
     CHECK(got_echo);
 
     uint32_t xs[4] = { 10, 20, 30, 40 };
-    rc = chc_block_builder_init(&bb, &L->al, &err); CHECK_OK(rc, err);
+    chc_block_builder_init(&bb, bbcols);
     rc = chc_type_parse("UInt32", 6, &L->al, &tu, &err); CHECK_OK(rc, err);
-    rc = chc_block_builder_append_fixed(bb, "x", 1, tu, xs, 4, &err); CHECK_OK(rc, err);
-    rc = chc_async_send_data(L->cli, bb, &err); CHECK_OK(rc, err);
+    chc_column cx = chc_build_fixed(xs, sizeof xs[0], 4);
+    chc_block_builder_append(&bb, "x", 1, tu, &cx);
+    rc = chc_async_send_data(L->cli, &bb, &err); CHECK_OK(rc, err);
     rc = chc_async_send_data_end(L->cli, &err); CHECK_OK(rc, err);
     /* Flush outbound + drain to EndOfStream. */
     rc = recv_until_eos(L, NULL, NULL, &err); CHECK_OK(rc, err);
@@ -368,7 +370,6 @@ test_uring_insert(loop_ctx *L)
     CHECK_EQ_U64(rows, 4);
     CHECK_EQ_U64(sum, 100);
 out:
-    chc_block_builder_destroy(bb);
     chc_type_destroy(tu, &L->al);
 }
 

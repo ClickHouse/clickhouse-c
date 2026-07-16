@@ -19,7 +19,8 @@ test_write_uint_string_block(chc_io *io, const chc_alloc *al,
                              chc_err *err)
 {
     int rc = -1;
-    chc_block_builder *bb = NULL;
+    chc_block_col bbcols[2];
+    chc_block_builder bb;
     chc_type *tu = NULL, *ts = NULL;
     uint32_t *u = malloc((size_t) n_rows * sizeof *u);
     uint64_t *off = malloc((size_t) n_rows * sizeof *off);
@@ -33,17 +34,15 @@ test_write_uint_string_block(chc_io *io, const chc_alloc *al,
         total += (size_t) k;
         off[i] = total;
     }
-    if (chc_block_builder_init(&bb, al, err)) goto done;
+    chc_block_builder_init(&bb, bbcols);
     if (chc_type_parse("UInt32", 6, al, &tu, err)) goto done;
     if (chc_type_parse("String", 6, al, &ts, err)) goto done;
-    if (chc_block_builder_append_fixed(bb, "u", 1, tu, u, n_rows, err))
-        goto done;
-    if (chc_block_builder_append_string(bb, "s", 1, off, (uint8_t *) sdata,
-                                        n_rows, err))
-        goto done;
-    rc = chc_block_write(io, bb, opts, err);
+    chc_column ucol = chc_build_fixed(u, sizeof u[0], (size_t) n_rows);
+    chc_block_builder_append(&bb, "u", 1, tu, &ucol);
+    chc_column scol = chc_build_string(off, (uint8_t *) sdata, (size_t) n_rows);
+    chc_block_builder_append(&bb, "s", 1, ts, &scol);
+    rc = chc_block_write(io, &bb, opts, err);
 done:
-    chc_block_builder_destroy(bb);
     chc_type_destroy(tu, al);
     chc_type_destroy(ts, al);
     free(u);
@@ -57,7 +56,8 @@ test_write_nullable_array_block(chc_io *io, const chc_alloc *al,
                                 const chc_block_opts *opts, chc_err *err)
 {
     int rc = -1;
-    chc_block_builder *bb = NULL;
+    chc_block_col bbcols[2];
+    chc_block_builder bb;
     chc_type *tn = NULL, *ta = NULL;
     uint8_t  nulls[4] = { 0, 1, 0, 1 };
     uint64_t noff[4] = { 2, 2, 5, 5 };
@@ -65,18 +65,17 @@ test_write_nullable_array_block(chc_io *io, const chc_alloc *al,
     uint64_t aoff[4] = { 3, 3, 6, 10 };
     uint32_t aval[10] = { 1,2,3, 7,8,9, 10,11,12,13 };
 
-    if (chc_block_builder_init(&bb, al, err)) goto done;
+    chc_block_builder_init(&bb, bbcols);
     if (chc_type_parse("Nullable(String)", 16, al, &tn, err)) goto done;
     if (chc_type_parse("Array(UInt32)", 13, al, &ta, err)) goto done;
-    if (chc_block_builder_append_nullable_string(bb, "n", 1, tn, nulls,
-            noff, nbuf, 4, err))
-        goto done;
-    if (chc_block_builder_append_array_fixed(bb, "a", 1, ta, aoff, aval,
-            4, err))
-        goto done;
-    rc = chc_block_write(io, bb, opts, err);
+    chc_column strings = chc_build_string(noff, nbuf, 4);
+    chc_column nullable = chc_build_nullable(nulls, &strings);
+    chc_block_builder_append(&bb, "n", 1, tn, &nullable);
+    chc_column values = chc_build_fixed(aval, sizeof aval[0], 10);
+    chc_column array = chc_build_array(aoff, 4, &values);
+    chc_block_builder_append(&bb, "a", 1, ta, &array);
+    rc = chc_block_write(io, &bb, opts, err);
 done:
-    chc_block_builder_destroy(bb);
     chc_type_destroy(tn, al);
     chc_type_destroy(ta, al);
     return rc;
@@ -87,20 +86,20 @@ test_write_lc_string_block(chc_io *io, const chc_alloc *al,
                            const chc_block_opts *opts, chc_err *err)
 {
     int rc = -1;
-    chc_block_builder *bb = NULL;
+    chc_block_col bbcols[2];
+    chc_block_builder bb;
     chc_type *t = NULL;
     uint64_t doff[3] = { 3, 8, 12 };
     const uint8_t ddata[] = "redgreenblue";
     uint8_t keys[5] = { 0, 2, 1, 0, 2 };
 
-    if (chc_block_builder_init(&bb, al, err)) goto done;
+    chc_block_builder_init(&bb, bbcols);
     if (chc_type_parse("LowCardinality(String)", 22, al, &t, err)) goto done;
-    if (chc_block_builder_append_low_cardinality_string(bb, "lc", 2, t,
-            1, keys, doff, ddata, 3, 5, err))
-        goto done;
-    rc = chc_block_write(io, bb, opts, err);
+    chc_column dict = chc_build_string(doff, ddata, 3);
+    chc_column lc = chc_build_lc(1, keys, 5, &dict);
+    chc_block_builder_append(&bb, "lc", 2, t, &lc);
+    rc = chc_block_write(io, &bb, opts, err);
 done:
-    chc_block_builder_destroy(bb);
     chc_type_destroy(t, al);
     return rc;
 }

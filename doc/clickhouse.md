@@ -225,11 +225,30 @@ typedef enum chc_col_kind {
 
 typedef struct chc_column chc_column;
 
+struct chc_column {
+    chc_col_kind layout;
+    size_t       n_rows;
+    union {
+        struct { void *data; size_t elem_size; } fixed;
+        struct { uint8_t *data; uint64_t *offsets; size_t bytes; } str;
+        struct { uint8_t *null_map; chc_column *inner; } nullable;
+        struct { uint64_t *offsets; chc_column *values; } array;
+        struct { chc_column **children; size_t arity; } tuple;
+        struct {
+            int key_size; void *keys; chc_column *dict; size_t dict_n;
+        } lc;
+    };
+};
+
 chc_col_kind chc_column_layout (const chc_column *c);
 size_t       chc_column_n_rows (const chc_column *c);
 
 int          chc_column_validate(const chc_column *c, chc_err *err);
 ```
+
+`chc_column` is a public tree node. `chc_block_read` allocates and owns its
+trees; writer callers can build compatible caller-owned trees or reuse reader
+output directly. Access through fields or helpers below.
 
 Caller dispatches on `chc_column_layout`:
 
@@ -289,11 +308,14 @@ bytes read past a block boundary stay buffered for the next call. A fresh
 
 BlockInfo accessors return zero when `has_block_info == false`.
 
-`JSON` & `Object('json')` decode only under string serialization: set
-`output_format_native_write_json_as_string=1` on the SELECT. Each row then
-arrives as one JSON document in a `CHC_COL_STRING` column, so the string
-accessors apply. Any other serialization version returns `CHC_ERR_TYPE`
-naming the setting.
+`JSON` decodes only under string serialization: set
+`output_format_native_write_json_as_string=1` on the SELECT. Modern JSON uses
+an 8-byte serialization version. Legacy `Object('json')` uses a distinct
+1-byte serialization kind and decodes only STRING kind 1; TUPLE kind 0
+returns `CHC_ERR_TYPE`. Each supported row arrives as one JSON document in a
+`CHC_COL_STRING` column, so string accessors apply. Prefix rides the column's
+prefix sub-stream, ahead of null map / offsets, so composite nesting preserves
+stream order.
 
 `QBit(T, N)` decodes to `CHC_COL_TUPLE`: `element_size` `FixedString(ceil(N/8))`
 bit-plane columns, MSB plane first. See [Type AST](#type-ast) for the dimension
@@ -326,43 +348,106 @@ bounds. Bounding the element counts & FixedString width also keeps
 ## Block writer
 
 ```c
-typedef struct chc_block_builder chc_block_builder;
+typedef struct {
+    const char       *name;
+    size_t            name_len;
+    const chc_type   *type;
+    const chc_column *col;
+} chc_block_col;
 
-int  chc_block_builder_init   (chc_block_builder **out, const chc_alloc *al,
-                               chc_err *err);
-void chc_block_builder_destroy(chc_block_builder *bb);
+typedef struct chc_block_builder {
+    chc_block_col *cols;
+    size_t         n_cols;
+    size_t         n_rows;
+} chc_block_builder;
 
-int  chc_block_builder_append_fixed (chc_block_builder *bb,
-                                     const char *name, size_t name_len,
-                                     const chc_type *t,
-                                     const void *data, size_t n_rows,
-                                     chc_err *err);
+void chc_block_builder_init(chc_block_builder *bb, chc_block_col *cols);
 
-int  chc_block_builder_append_string(chc_block_builder *bb,
-                                     const char *name, size_t name_len,
-                                     const uint64_t *offsets,
-                                     const uint8_t *data, size_t n_rows,
-                                     chc_err *err);
+chc_column chc_build_fixed  (const void *data, size_t elem_size,
+                             size_t n_rows);
+chc_column chc_build_string (const uint64_t *offsets, const uint8_t *data,
+                             size_t n_rows);
+chc_column chc_build_nullable(const uint8_t *null_map, chc_column *inner);
+chc_column chc_build_array  (const uint64_t *offsets, size_t n_rows,
+                             chc_column *values);
+chc_column chc_build_tuple  (chc_column **children, size_t arity);
+chc_column chc_build_lc     (int key_size, const void *keys, size_t n_rows,
+                             chc_column *dict);
 
-int  chc_block_write(chc_io *io, const chc_block_builder *bb,
-                     const chc_block_opts *opts, chc_err *err);
+void chc_block_builder_append(chc_block_builder *bb,
+                              const char *name, size_t name_len,
+                              const chc_type *t, const chc_column *col);
+
+int chc_block_write_cols(chc_io *io, const chc_block_col *cols,
+                         size_t n_cols, size_t n_rows,
+                         const chc_block_opts *opts, chc_err *err);
+
+int chc_block_write(chc_io *io, const chc_block_builder *bb,
+                    const chc_block_opts *opts, chc_err *err);
 ```
 
-Append calls record slab pointers; nothing is copied. Slabs must outlive
-`chc_block_write`. Offsets are cumulative exclusive ends in host byte
-order; fixed data is `n_rows * elem_size` little-endian bytes.
+Builder uses caller-provided `chc_block_col` storage and allocates nothing, so
+no destroy call is needed. Given parsed `chc_type *array_nullable_u32`, init
+storage, construct column tree by value, then append root:
 
-Beyond `append_fixed` & `append_string`, matching helpers cover the common
-nested shapes: `append_nullable_fixed`, `append_nullable_string`,
-`append_array_fixed`, `append_array_string`, `append_array_nested_fixed`,
-`append_array_nested_string`, `append_low_cardinality_string`, &
-`append_json_string` (writes the 8-byte version-1 prefix, then the
-`append_string` wire shape; pairs with `output_format_native_write_json_as_string=1`).
-Signatures & per-call contracts are inline in `clickhouse.h`.
+```c
+chc_block_col storage[1];
+chc_block_builder bb;
+chc_block_builder_init(&bb, storage);
 
-For INSERT over TCP, hand the builder to `chc_client_send_data` rather
-than calling `chc_block_write` directly — the client sets the right
-`opts` from the negotiated revision and handles compression.
+uint32_t values[] = { 10, 0, 30 };
+uint8_t nulls[] = { 0, 1, 0 };
+uint64_t offsets[] = { 2, 3 };
+
+chc_column fixed = chc_build_fixed(values, sizeof values[0], 3);
+chc_column nullable = chc_build_nullable(nulls, &fixed);
+chc_column array = chc_build_array(offsets, 2, &nullable);
+
+chc_block_builder_append(&bb, "v", 1, array_nullable_u32, &array);
+```
+
+This is `Array(Nullable(UInt32))`. Compose Array, Tuple, Map, LowCardinality,
+and deeper combinations from same nodes. Row counts must be consistent across
+tree. For non-empty Array columns last offset equals rows in its values column
+
+Map has no node; build it as `Array(Tuple(K, V))`.
+```c
+/* Map(String, Int32) */
+chc_column keys = chc_build_string(key_offsets, key_data, n_pairs);
+chc_column vals = chc_build_fixed(int_vals, sizeof int_vals[0], n_pairs);
+chc_column *kv[2] = { &keys, &vals };
+chc_column entries = chc_build_tuple(kv, 2);
+chc_column map = chc_build_array(map_offsets, n_rows, &entries);
+```
+
+Geo types are nested Array / Tuple aliases, also nodeless: `Point` is a 2-arity
+tuple of two `Float64` columns, `Ring` = `Array(Point)`, `Polygon` =
+`Array(Ring)`, `MultiPolygon` = `Array(Polygon)`.
+
+`LowCardinality(Nullable(T))` uses dict slot 0 as the null sentinel; keys of 0
+decode NULL. Supply the dict inner-typed with a slot-0 placeholder, or a
+`chc_build_nullable` wrapping it with `null_map[0] = 1`; writer unwraps and emits
+the same bytes. `chc_build_lc` row count is the key count, dict length comes from
+the dict column.
+
+Reader and builder share one tree, so a decoded `chc_column` from
+`chc_block_column` appends directly to re-encode a block.
+
+Builder records pointers without copying. Column storage, nodes, types, names,
+offsets, keys, null maps, and data slabs must outlive `chc_block_write` or
+`chc_client_send_data`. Offsets and LowCardinality keys use host byte order;
+fixed data contains `n_rows * elem_size` little-endian bytes. String offsets
+are cumulative exclusive ends. `chc_build_string` also supplies JSON and Object
+STRING serialization. Writer emits JSON's 8-byte version-1 prefix or Object's
+1-byte STRING-kind prefix based on type.
+
+`chc_block_builder_append` only records the column; caller must size the storage
+array. Writer checks tree layout and top-level row count against the parsed
+ClickHouse type. Call `chc_block_write_cols` with a caller-built `chc_block_col`
+array to skip builder.
+
+For INSERT over TCP, hand builder to `chc_client_send_data` rather than calling
+`chc_block_write`; client sets `opts` based on revision and handles compression.
 
 ## Pitfalls
 
