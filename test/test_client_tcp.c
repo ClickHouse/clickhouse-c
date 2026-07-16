@@ -517,12 +517,12 @@ test_insert_roundtrip(void)
 {
     current_test = "insert_roundtrip";
     test_conn t; chc_err err = {};
-    chc_block_builder *bb = NULL;
-    chc_type *u32 = NULL;
+    chc_block_col bbcols[2];
+    chc_block_builder bb;
+    chc_type *u32 = NULL, *str = NULL;
     int rc = open_conn(&t, &err); CHECK_OK(rc, err);
 
-    /* Drop+create a Memory table (Memory engine doesn't persist across
-     * server restarts but lives for this run). */
+    /* Recreate Memory table, valid only until server restart */
     rc = run_simple_query(&t, "DROP TABLE IF EXISTS test_t SYNC", &err);
     CHECK_OK(rc, err);
     rc = run_simple_query(&t,
@@ -535,29 +535,30 @@ test_insert_roundtrip(void)
     rc = recv_insert_header(&t, 8, &err);
     CHECK_OK(rc, err);
 
-    /* Build a 3-row block. */
-    rc = chc_block_builder_init(&bb, &t.al, &err); CHECK_OK(rc, err);
+    /* Build 3-row block */
+    chc_block_builder_init(&bb, bbcols);
 
     uint32_t xs[3] = { 100, 200, 300 };
     rc = chc_type_parse("UInt32", 6, &t.al, &u32, &err); CHECK_OK(rc, err);
-    rc = chc_block_builder_append_fixed(bb, "x", 1, u32, xs, 3, &err);
-    CHECK_OK(rc, err);
+    chc_column cx = chc_build_fixed(xs, sizeof xs[0], 3);
+    chc_block_builder_append(&bb, "x", 1, u32, &cx);
 
     uint64_t offs[3] = { 2, 5, 6 };
     const uint8_t bytes[] = "abcdez";   /* "ab", "cde", "z" */
-    rc = chc_block_builder_append_string(bb, "s", 1, offs, bytes, 3, &err);
-    CHECK_OK(rc, err);
+    rc = chc_type_parse("String", 6, &t.al, &str, &err); CHECK_OK(rc, err);
+    chc_column cs = chc_build_string(offs, bytes, 3);
+    chc_block_builder_append(&bb, "s", 1, str, &cs);
 
-    rc = chc_client_send_data(t.c, bb, &err); CHECK_OK(rc, err);
+    rc = chc_client_send_data(t.c, &bb, &err); CHECK_OK(rc, err);
     rc = chc_client_send_data(t.c, NULL, &err); CHECK_OK(rc, err);
 
     rc = recv_until_eos(&t, 32, NULL, NULL, &err);
     CHECK_OK(rc, err);
 
-    chc_block_builder_destroy(bb);
-    bb = NULL;
     chc_type_destroy(u32, &t.al);
     u32 = NULL;
+    chc_type_destroy(str, &t.al);
+    str = NULL;
 
     /* Read it back. */
     rc = send_query(&t, "SELECT x, s FROM test_t ORDER BY x", &err);
@@ -574,8 +575,8 @@ test_insert_roundtrip(void)
     CHECK_OK(rc, err);
 
 out:
-    chc_block_builder_destroy(bb);
     chc_type_destroy(u32, &t.al);
+    chc_type_destroy(str, &t.al);
     close_conn(&t);
 }
 
@@ -698,7 +699,8 @@ run_insert_compressed_roundtrip(chc_compression comp, const char *table,
     test_conn t;
     chc_err err = {};
     uint32_t *xs = NULL;
-    chc_block_builder *bb = NULL;
+    chc_block_col bbcols[2];
+    chc_block_builder bb;
     chc_type *u32 = NULL;
     const size_t N = 500;
     char sql[160];
@@ -737,19 +739,17 @@ run_insert_compressed_roundtrip(chc_compression comp, const char *table,
     if (!xs) goto out;
     for (size_t i = 0; i < N; i++) xs[i] = (uint32_t) i;
 
-    rc = chc_block_builder_init(&bb, &t.al, &err); CHECK_OK(rc, err);
+    chc_block_builder_init(&bb, bbcols);
     rc = chc_type_parse("UInt32", 6, &t.al, &u32, &err); CHECK_OK(rc, err);
-    rc = chc_block_builder_append_fixed(bb, "x", 1, u32, xs, N, &err);
-    CHECK_OK(rc, err);
+    chc_column cx = chc_build_fixed(xs, sizeof xs[0], N);
+    chc_block_builder_append(&bb, "x", 1, u32, &cx);
 
-    rc = chc_client_send_data(t.c, bb, &err); CHECK_OK(rc, err);
+    rc = chc_client_send_data(t.c, &bb, &err); CHECK_OK(rc, err);
     rc = chc_client_send_data(t.c, NULL, &err); CHECK_OK(rc, err);
 
     rc = recv_until_eos(&t, 32, NULL, NULL, &err);
     CHECK_OK(rc, err);
 
-    chc_block_builder_destroy(bb);
-    bb = NULL;
     chc_type_destroy(u32, &t.al);
     u32 = NULL;
     free(xs);
@@ -774,7 +774,6 @@ run_insert_compressed_roundtrip(chc_compression comp, const char *table,
     CHECK_OK(rc, err);
 
 out:
-    chc_block_builder_destroy(bb);
     chc_type_destroy(u32, &t.al);
     free(xs);
     close_conn(&t);

@@ -26,6 +26,7 @@ static int  fail_count = 0;
 static const char *current_test = "";
 
 #include "test_common.h"
+#include "test_block_compare.h"
 
 static pid_t
 spawn_local(const char *query, int *out_fd)
@@ -51,8 +52,59 @@ spawn_local(const char *query, int *out_fd)
     return pid;
 }
 
+static void
+check_read_write_read(const chc_block *source, const chc_alloc *al,
+                      const chc_block_opts *opts)
+{
+    size_t n_cols = chc_block_n_columns(source);
+    chc_block_col *cols = calloc(n_cols, sizeof *cols);
+    test_mem_sink sink;
+    chc_io write_io;
+    chc_block *copy = NULL;
+    chc_err err = {};
+
+    CHECK(cols != NULL || n_cols == 0);
+    if (!cols && n_cols != 0) return;
+
+    for (size_t i = 0; i < n_cols; i++) {
+        cols[i].name = chc_block_column_name(source, i, &cols[i].name_len);
+        cols[i].type = chc_block_column_type(source, i);
+        cols[i].col = chc_block_column(source, i);
+    }
+
+    test_mem_sink_init(&sink, &write_io);
+    int rc = chc_block_write_cols(&write_io, cols, n_cols,
+                                  chc_block_n_rows(source), opts, &err);
+    if (rc != CHC_OK) {
+        fprintf(stderr, "%s: rewrite failed (rc=%d): %s\n",
+                current_test, rc, err.msg);
+        fail_count++;
+        goto done;
+    }
+
+    test_mem_src mem;
+    chc_io read_io;
+    test_mem_src_init(&mem, &read_io, sink.data, sink.len);
+    rc = test_block_read_io(&read_io, al, opts, &copy, &err);
+    if (rc != CHC_OK || !copy) {
+        fprintf(stderr, "%s: reread failed (rc=%d): %s\n",
+                current_test, rc, err.msg);
+        fail_count++;
+        goto done;
+    }
+    if (!test_block_eq(source, copy)) {
+        fprintf(stderr, "%s: read-write-read mismatch\n", current_test);
+        fail_count++;
+    }
+
+done:
+    chc_block_destroy(copy, al);
+    test_mem_sink_free(&sink);
+    free(cols);
+}
+
 static chc_block *
-read_one_block(const char *query)
+read_roundtrip_block(const char *query)
 {
     int fd;
     pid_t pid = spawn_local(query, &fd);
@@ -76,6 +128,7 @@ read_one_block(const char *query)
     waitpid(pid, &status, 0);
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
         fprintf(stderr, "%s: child exited %d\n", current_test, WEXITSTATUS(status));
+    if (b) check_read_write_read(b, &al, &opts);
     return b;
 }
 
@@ -90,7 +143,7 @@ free_block(chc_block *b)
 
 static void test_uint32_string(void) {
     current_test = "uint32_string";
-    chc_block *b = read_one_block(
+    chc_block *b = read_roundtrip_block(
         "SELECT toUInt32(number) AS a, toString(number*7) AS b FROM numbers(5)");
     CHECK(b != NULL); if (!b) return;
     CHECK_EQ_U64(chc_block_n_rows(b), 5);
@@ -119,7 +172,7 @@ static void test_uint32_string(void) {
 
 static void test_nullable(void) {
     current_test = "nullable";
-    chc_block *b = read_one_block(
+    chc_block *b = read_roundtrip_block(
         "SELECT if(number % 2 = 0, toNullable(toInt64(number)), CAST(NULL,'Nullable(Int64)')) AS n "
         "FROM numbers(6)");
     CHECK(b != NULL); if (!b) return;
@@ -144,7 +197,7 @@ static void test_nullable(void) {
 static void test_array(void) {
     current_test = "array";
     /* Three rows, three differently-shaped arrays, packed into one block. */
-    chc_block *b = read_one_block(
+    chc_block *b = read_roundtrip_block(
         "SELECT cast([[1,2,3],[],[7,8]][number+1], 'Array(UInt8)') AS arr "
         "FROM numbers(3)");
     CHECK(b != NULL); if (!b) return;
@@ -167,7 +220,7 @@ static void test_array(void) {
 
 static void test_lowcardinality(void) {
     current_test = "lowcardinality";
-    chc_block *b = read_one_block(
+    chc_block *b = read_roundtrip_block(
         "SELECT cast(['hi','bye','hi','hi','bye'][number+1], 'LowCardinality(String)') AS lc "
         "FROM numbers(5)");
     CHECK(b != NULL); if (!b) return;
@@ -194,7 +247,7 @@ static void test_lowcardinality(void) {
 
 static void test_lowcardinality_nullable(void) {
     current_test = "lowcardinality_nullable";
-    chc_block *b = read_one_block(
+    chc_block *b = read_roundtrip_block(
         "SELECT cast(['hi', NULL, 'hi', NULL][number+1], "
         "            'LowCardinality(Nullable(String))') AS lc "
         "FROM numbers(4)");
@@ -237,7 +290,7 @@ static void test_lowcardinality_nullable(void) {
 
 static void test_tuple(void) {
     current_test = "tuple";
-    chc_block *b = read_one_block(
+    chc_block *b = read_roundtrip_block(
         "SELECT cast((toUInt8(number), toString(number)), 'Tuple(UInt8, String)') AS t "
         "FROM numbers(3)");
     CHECK(b != NULL); if (!b) return;
@@ -262,7 +315,7 @@ static void test_tuple(void) {
 
 static void test_named_tuple(void) {
     current_test = "named_tuple";
-    chc_block *b = read_one_block(
+    chc_block *b = read_roundtrip_block(
         "SELECT cast((toUInt8(number), toString(number)), "
         "            'Tuple(id UInt8, name String)') AS t "
         "FROM numbers(2)");
@@ -346,7 +399,7 @@ static void test_named_tuple_parser(void) {
 
 static void test_map(void) {
     current_test = "map";
-    chc_block *b = read_one_block(
+    chc_block *b = read_roundtrip_block(
         "SELECT cast(map('a', toInt32(1), 'b', toInt32(2)), 'Map(String, Int32)') AS m");
     CHECK(b != NULL); if (!b) return;
     const chc_column *c = chc_block_column(b, 0);
@@ -369,7 +422,7 @@ static void test_map(void) {
 
 static void test_point(void) {
     current_test = "point";
-    chc_block *b = read_one_block("SELECT (1.5, 2.5)::Point AS p");
+    chc_block *b = read_roundtrip_block("SELECT (1.5, 2.5)::Point AS p");
     CHECK(b != NULL); if (!b) return;
     const chc_column *c = chc_block_column(b, 0);
     CHECK(chc_column_layout(c) == CHC_COL_TUPLE);
@@ -385,7 +438,7 @@ static void test_point(void) {
 
 static void test_ring(void) {
     current_test = "ring";
-    chc_block *b = read_one_block(
+    chc_block *b = read_roundtrip_block(
         "SELECT [(0.0,0.0),(1.0,0.0),(0.0,1.0)]::Ring AS r");
     CHECK(b != NULL); if (!b) return;
     const chc_column *c = chc_block_column(b, 0);
@@ -406,7 +459,7 @@ static void test_ring(void) {
 
 static void test_polygon(void) {
     current_test = "polygon";
-    chc_block *b = read_one_block(
+    chc_block *b = read_roundtrip_block(
         "SELECT [[(0.0,0.0),(1.0,0.0),(1.0,1.0)],[(2.0,2.0),(3.0,3.0)]]::Polygon AS pg");
     CHECK(b != NULL); if (!b) return;
     const chc_column *c = chc_block_column(b, 0);
@@ -427,7 +480,7 @@ static void test_polygon(void) {
 
 static void test_multipolygon(void) {
     current_test = "multipolygon";
-    chc_block *b = read_one_block(
+    chc_block *b = read_roundtrip_block(
         "SELECT [[[(0.0,0.0),(1.0,0.0),(0.0,1.0)]],"
         "        [[(2.0,2.0),(3.0,3.0)]]]::MultiPolygon AS mp");
     CHECK(b != NULL); if (!b) return;
@@ -452,7 +505,7 @@ static void test_multipolygon(void) {
 
 static void test_decimal(void) {
     current_test = "decimal";
-    chc_block *b = read_one_block(
+    chc_block *b = read_roundtrip_block(
         "SELECT toDecimal64(1234.5, 2) AS d");
     CHECK(b != NULL); if (!b) return;
     const chc_type *t = chc_block_column_type(b, 0);
@@ -470,7 +523,7 @@ static void test_decimal(void) {
 
 static void test_uuid(void) {
     current_test = "uuid";
-    chc_block *b = read_one_block(
+    chc_block *b = read_roundtrip_block(
         "SELECT arrayJoin([toUUID('00000000-0000-0000-0000-000000000000'),"
         "                  toUUID('00112233-4455-6677-8899-aabbccddeeff'),"
         "                  toUUID('01020304-0506-0708-090a-0b0c0d0e0f10'),"
@@ -521,7 +574,7 @@ static void test_uuid(void) {
  */
 static void test_nothing(void) {
     current_test = "nothing";
-    chc_block *b = read_one_block("SELECT NULL FROM numbers(3)");
+    chc_block *b = read_roundtrip_block("SELECT NULL FROM numbers(3)");
     CHECK(b != NULL); if (!b) return;
     CHECK_EQ_U64(chc_block_n_rows(b), 3);
     CHECK_EQ_U64(chc_block_n_columns(b), 1);
@@ -555,7 +608,7 @@ static void test_nothing(void) {
  */
 static void test_date_widths(void) {
     current_test = "date_widths";
-    chc_block *b = read_one_block(
+    chc_block *b = read_roundtrip_block(
         "SELECT toDate('2020-01-02')      AS d1,"
         "       toDate32('2020-01-02')    AS d2,"
         "       toDateTime('2020-01-02 03:04:05', 'UTC') AS d3,"
@@ -606,7 +659,7 @@ static void test_date_widths(void) {
  */
 static void test_json_string(void) {
     current_test = "json_string";
-    chc_block *b = read_one_block(
+    chc_block *b = read_roundtrip_block(
         "SELECT arrayJoin(['{}', '{\"a\":1}'])::JSON AS j "
         "SETTINGS output_format_native_write_json_as_string = 1");
     CHECK(b != NULL); if (!b) return;
@@ -629,6 +682,53 @@ static void test_json_string(void) {
     int row1_ok = (row1_len == 9 && memcmp(row1, "{\"a\":\"1\"}", 9) == 0) ||
                   (row1_len == 7 && memcmp(row1, "{\"a\":1}", 7) == 0);
     CHECK(row1_ok);
+    free_block(b);
+}
+
+/*
+ * JSON version rides the prefix sub-stream, so for composite-wrapped JSON
+ * it precedes null map / array offsets. Top-level JSON can't tell prefix
+ * from body-inline (empty prefix abuts body); nested placement can.
+ */
+static void test_json_nested(void) {
+    current_test = "json_nested";
+    chc_block *b = read_roundtrip_block(
+        "SELECT arrayJoin(['{\"a\":1}', NULL])::Nullable(JSON) AS n, "
+        "['{}', '{\"b\":2}']::Array(JSON) AS a "
+        "SETTINGS output_format_native_write_json_as_string = 1");
+    CHECK(b != NULL); if (!b) return;
+    CHECK_EQ_U64(chc_block_n_rows(b), 2);
+    CHECK_EQ_U64(chc_block_n_columns(b), 2);
+
+    const chc_type *tn = chc_block_column_type(b, 0);
+    CHECK_EQ_I64(chc_type_kind(tn), CHC_NULLABLE);
+    CHECK_EQ_I64(chc_type_kind(chc_type_child(tn, 0)), CHC_JSON);
+    const chc_column *n = chc_block_column(b, 0);
+    CHECK(chc_column_layout(n) == CHC_COL_NULLABLE);
+    const uint8_t *nm = chc_column_null_map(n);
+    CHECK_EQ_I64(nm[0], 0);
+    CHECK_EQ_I64(nm[1], 1);
+    const chc_column *doc = chc_column_nullable_inner(n);
+    CHECK(chc_column_layout(doc) == CHC_COL_STRING);
+    const uint8_t  *nd = chc_column_string_data(doc);
+    const uint64_t *no = chc_column_string_offsets(doc);
+    int row0_ok = (no[0] == 9 && memcmp(nd, "{\"a\":\"1\"}", 9) == 0) ||
+                  (no[0] == 7 && memcmp(nd, "{\"a\":1}", 7) == 0);
+    CHECK(row0_ok);
+
+    const chc_type *ta = chc_block_column_type(b, 1);
+    CHECK_EQ_I64(chc_type_kind(ta), CHC_ARRAY);
+    CHECK_EQ_I64(chc_type_kind(chc_type_child(ta, 0)), CHC_JSON);
+    const chc_column *a = chc_block_column(b, 1);
+    CHECK(chc_column_layout(a) == CHC_COL_ARRAY);
+    const uint64_t *ao = chc_column_array_offsets(a);
+    CHECK_EQ_U64(ao[0], 2);
+    CHECK_EQ_U64(ao[1], 4);
+    const chc_column *av = chc_column_array_values(a);
+    CHECK(chc_column_layout(av) == CHC_COL_STRING);
+    const uint8_t  *ad = chc_column_string_data(av);
+    const uint64_t *aoffs = chc_column_string_offsets(av);
+    CHECK_STR_EQ((const char *) ad, (size_t) aoffs[0], "{}");
     free_block(b);
 }
 
@@ -672,7 +772,7 @@ static void test_json_wrong_version(void) {
  */
 static void test_column_validate(void) {
     current_test = "column_validate";
-    chc_block *b = read_one_block(
+    chc_block *b = read_roundtrip_block(
         "SELECT cast([[1,2,3],[],[7,8]][number+1], 'Array(UInt8)') AS arr, "
         "cast(['hi','bye','hi','hi','bye'][number+1], 'LowCardinality(String)') AS lc "
         "FROM numbers(3)");
@@ -957,6 +1057,7 @@ static void test_qbit_decode(void) {
                 CHECK_EQ_I64(d[0], (p >= 2 && p <= 8) ? 0x01 : 0x00);
             }
             CHECK_EQ_U64(chc_column_validate(c, &err), CHC_OK);
+            check_read_write_read(b, &al, &opts);
             free_block(b);
         }
     }
@@ -997,6 +1098,7 @@ static void test_qbit_decode(void) {
                 CHECK_EQ_I64(d[0], buf[body0 + 2 * p]);
                 CHECK_EQ_I64(d[1], buf[body0 + 2 * p + 1]);
             }
+            check_read_write_read(b, &al, &opts);
             free_block(b);
         }
     }
@@ -1022,6 +1124,7 @@ int main(void) {
     test_polygon();
     test_multipolygon();
     test_json_string();
+    test_json_nested();
     test_json_wrong_version();
     test_column_validate();
     test_invalid_array_overflow();

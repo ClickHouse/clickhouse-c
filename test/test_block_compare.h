@@ -6,9 +6,33 @@
 #define CLICKHOUSE_TEST_BLOCK_COMPARE_H
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int test_col_eq(const chc_column *a, const chc_column *b);
+
+static int
+test_type_eq(const chc_type *a, const chc_type *b)
+{
+    if (!a || !b) return a == b;
+    size_t na = chc_type_format(a, NULL, 0);
+    size_t nb = chc_type_format(b, NULL, 0);
+    if (na != nb) return 0;
+
+    char *sa = malloc(na + 1);
+    char *sb = malloc(nb + 1);
+    if (!sa || !sb) {
+        free(sa);
+        free(sb);
+        return 0;
+    }
+    chc_type_format(a, sa, na + 1);
+    chc_type_format(b, sb, nb + 1);
+    int eq = memcmp(sa, sb, na) == 0;
+    free(sa);
+    free(sb);
+    return eq;
+}
 
 CHC_MAYBE_UNUSED static int
 test_col_eq(const chc_column *a, const chc_column *b)
@@ -80,11 +104,16 @@ test_block_eq(const chc_block *a, const chc_block *b)
     if (!a || !b) return a == b;
     if (chc_block_n_rows(a) != chc_block_n_rows(b)) return 0;
     if (chc_block_n_columns(a) != chc_block_n_columns(b)) return 0;
+    if (chc_block_is_overflows(a) != chc_block_is_overflows(b)) return 0;
+    if (chc_block_bucket_num(a) != chc_block_bucket_num(b)) return 0;
     for (size_t i = 0; i < chc_block_n_columns(a); i++) {
         size_t la, lb;
         const char *na = chc_block_column_name(a, i, &la);
         const char *nb = chc_block_column_name(b, i, &lb);
         if (la != lb || (la && memcmp(na, nb, la) != 0)) return 0;
+        if (!test_type_eq(chc_block_column_type(a, i),
+                          chc_block_column_type(b, i)))
+            return 0;
         if (!test_col_eq(chc_block_column(a, i), chc_block_column(b, i)))
             return 0;
     }
