@@ -180,7 +180,8 @@ typedef enum chc_kind {
     CHC_NULLABLE, CHC_ARRAY, CHC_TUPLE, CHC_MAP, CHC_NESTED,
     CHC_LOW_CARDINALITY,
     CHC_INTERVAL,
-    CHC_POINT, CHC_RING, CHC_POLYGON, CHC_MULTI_POLYGON,
+    CHC_POINT, CHC_RING, CHC_LINE_STRING,
+    CHC_POLYGON, CHC_MULTI_POLYGON, CHC_MULTI_LINE_STRING,
     CHC_VARIANT, CHC_DYNAMIC, CHC_JSON, CHC_OBJECT,
     CHC_AGGREGATE_FUNCTION, CHC_SIMPLE_AGGREGATE_FUNCTION,
     CHC_QBIT,
@@ -1232,72 +1233,74 @@ chc__atoi64(const char *s, size_t n, int64_t *out)
 
 /* AUTO-GENERATED-NAME-TABLE-BEGIN -- regenerate via tools/regen_name_table.sh */
 #define CHC__NAME_TABLE_M 256u
-#define CHC__NAME_TABLE_SEED 720ull
+#define CHC__NAME_TABLE_SEED 5935ull
 struct chc__name_row { const char *name; chc_kind kind; };
 static const struct chc__name_row chc__name_table[CHC__NAME_TABLE_M] = {
-    [  4] = {"Int32", CHC_INT32},
-    [  8] = {"Float32", CHC_FLOAT32},
-    [ 13] = {"MultiPolygon", CHC_MULTI_POLYGON},
-    [ 20] = {"DateTime", CHC_DATETIME},
-    [ 21] = {"Dynamic", CHC_DYNAMIC},
-    [ 30] = {"IntervalMinute", CHC_INTERVAL},
-    [ 33] = {"Ring", CHC_RING},
-    [ 36] = {"IntervalMicrosecond", CHC_INTERVAL},
-    [ 37] = {"Decimal64", CHC_DECIMAL64},
-    [ 40] = {"DateTime64", CHC_DATETIME64},
-    [ 43] = {"Int128", CHC_INT128},
-    [ 44] = {"Tuple", CHC_TUPLE},
-    [ 48] = {"IntervalDay", CHC_INTERVAL},
-    [ 49] = {"Map", CHC_MAP},
-    [ 50] = {"IntervalSecond", CHC_INTERVAL},
-    [ 52] = {"UInt8", CHC_UINT8},
-    [ 55] = {"Enum16", CHC_ENUM16},
-    [ 57] = {"IntervalMillisecond", CHC_INTERVAL},
-    [ 60] = {"Int8", CHC_INT8},
-    [ 65] = {"IntervalHour", CHC_INTERVAL},
-    [ 68] = {"UInt256", CHC_UINT256},
-    [ 73] = {"Date32", CHC_DATE32},
-    [ 74] = {"BFloat16", CHC_BFLOAT16},
-    [ 83] = {"Nullable", CHC_NULLABLE},
-    [ 89] = {"IntervalMonth", CHC_INTERVAL},
-    [101] = {"UInt128", CHC_UINT128},
-    [106] = {"Enum8", CHC_ENUM8},
-    [111] = {"Void", CHC_VOID},
-    [115] = {"IPv4", CHC_IPV4},
-    [120] = {"Variant", CHC_VARIANT},
-    [121] = {"LowCardinality", CHC_LOW_CARDINALITY},
-    [122] = {"Time64", CHC_TIME64},
-    [123] = {"Decimal128", CHC_DECIMAL128},
-    [130] = {"UInt64", CHC_UINT64},
-    [132] = {"UInt32", CHC_UINT32},
-    [133] = {"Int16", CHC_INT16},
-    [134] = {"JSON", CHC_JSON},
-    [135] = {"SimpleAggregateFunction", CHC_SIMPLE_AGGREGATE_FUNCTION},
-    [136] = {"IntervalNanosecond", CHC_INTERVAL},
-    [140] = {"QBit", CHC_QBIT},
-    [150] = {"Nothing", CHC_NOTHING},
-    [151] = {"Date", CHC_DATE},
-    [157] = {"IPv6", CHC_IPV6},
-    [168] = {"Array", CHC_ARRAY},
-    [172] = {"Time", CHC_TIME},
-    [177] = {"Object", CHC_OBJECT},
-    [178] = {"Decimal32", CHC_DECIMAL32},
-    [183] = {"Decimal256", CHC_DECIMAL256},
-    [189] = {"UUID", CHC_UUID},
-    [206] = {"Nested", CHC_NESTED},
-    [211] = {"Polygon", CHC_POLYGON},
-    [214] = {"String", CHC_STRING},
-    [218] = {"AggregateFunction", CHC_AGGREGATE_FUNCTION},
-    [219] = {"Int256", CHC_INT256},
-    [223] = {"UInt16", CHC_UINT16},
-    [224] = {"IntervalQuarter", CHC_INTERVAL},
-    [232] = {"Bool", CHC_BOOL},
-    [236] = {"FixedString", CHC_FIXED_STRING},
-    [237] = {"Int64", CHC_INT64},
-    [245] = {"IntervalYear", CHC_INTERVAL},
-    [246] = {"Float64", CHC_FLOAT64},
-    [253] = {"IntervalWeek", CHC_INTERVAL},
-    [254] = {"Point", CHC_POINT},
+    [  2] = {"Ring", CHC_RING},
+    [  6] = {"Tuple", CHC_TUPLE},
+    [  9] = {"IntervalHour", CHC_INTERVAL},
+    [ 27] = {"UInt8", CHC_UINT8},
+    [ 29] = {"Nothing", CHC_NOTHING},
+    [ 36] = {"Object", CHC_OBJECT},
+    [ 39] = {"Void", CHC_VOID},
+    [ 42] = {"IntervalYear", CHC_INTERVAL},
+    [ 45] = {"Nullable", CHC_NULLABLE},
+    [ 51] = {"Enum8", CHC_ENUM8},
+    [ 52] = {"LineString", CHC_LINE_STRING},
+    [ 59] = {"Bool", CHC_BOOL},
+    [ 67] = {"FixedString", CHC_FIXED_STRING},
+    [ 68] = {"Enum16", CHC_ENUM16},
+    [ 71] = {"Int16", CHC_INT16},
+    [ 72] = {"IntervalDay", CHC_INTERVAL},
+    [ 73] = {"UUID", CHC_UUID},
+    [ 80] = {"AggregateFunction", CHC_AGGREGATE_FUNCTION},
+    [ 81] = {"DateTime64", CHC_DATETIME64},
+    [ 85] = {"MultiPolygon", CHC_MULTI_POLYGON},
+    [ 86] = {"IntervalQuarter", CHC_INTERVAL},
+    [ 97] = {"Decimal64", CHC_DECIMAL64},
+    [ 98] = {"Array", CHC_ARRAY},
+    [107] = {"Time64", CHC_TIME64},
+    [109] = {"LowCardinality", CHC_LOW_CARDINALITY},
+    [111] = {"QBit", CHC_QBIT},
+    [112] = {"IntervalNanosecond", CHC_INTERVAL},
+    [113] = {"Int64", CHC_INT64},
+    [118] = {"UInt32", CHC_UINT32},
+    [123] = {"IntervalMillisecond", CHC_INTERVAL},
+    [126] = {"MultiLineString", CHC_MULTI_LINE_STRING},
+    [127] = {"UInt128", CHC_UINT128},
+    [129] = {"DateTime", CHC_DATETIME},
+    [133] = {"IntervalMinute", CHC_INTERVAL},
+    [134] = {"Date", CHC_DATE},
+    [137] = {"IntervalSecond", CHC_INTERVAL},
+    [138] = {"String", CHC_STRING},
+    [139] = {"Date32", CHC_DATE32},
+    [141] = {"IPv6", CHC_IPV6},
+    [142] = {"Point", CHC_POINT},
+    [151] = {"IntervalMonth", CHC_INTERVAL},
+    [153] = {"Time", CHC_TIME},
+    [154] = {"Float32", CHC_FLOAT32},
+    [159] = {"Int8", CHC_INT8},
+    [160] = {"BFloat16", CHC_BFLOAT16},
+    [168] = {"Variant", CHC_VARIANT},
+    [170] = {"Decimal256", CHC_DECIMAL256},
+    [173] = {"SimpleAggregateFunction", CHC_SIMPLE_AGGREGATE_FUNCTION},
+    [174] = {"Map", CHC_MAP},
+    [175] = {"Decimal32", CHC_DECIMAL32},
+    [176] = {"IntervalWeek", CHC_INTERVAL},
+    [180] = {"JSON", CHC_JSON},
+    [192] = {"Float64", CHC_FLOAT64},
+    [202] = {"Int128", CHC_INT128},
+    [204] = {"Int256", CHC_INT256},
+    [205] = {"Nested", CHC_NESTED},
+    [206] = {"Int32", CHC_INT32},
+    [215] = {"Polygon", CHC_POLYGON},
+    [223] = {"UInt256", CHC_UINT256},
+    [226] = {"UInt16", CHC_UINT16},
+    [238] = {"UInt64", CHC_UINT64},
+    [240] = {"IntervalMicrosecond", CHC_INTERVAL},
+    [247] = {"IPv4", CHC_IPV4},
+    [251] = {"Dynamic", CHC_DYNAMIC},
+    [252] = {"Decimal128", CHC_DECIMAL128},
 };
 /* AUTO-GENERATED-NAME-TABLE-END */
 
@@ -2019,9 +2022,9 @@ chc__col_read_prefix(chc_in *in, const chc_type *t, chc_err *err)
 }
 
 /* Geo types are aliases for nested Array(...(Tuple(Float64,Float64))). depth
- * 0 = Point, 1 = Ring (Array(Point)), 2 = Polygon (Array(Ring)),
- * 3 = MultiPolygon (Array(Polygon)). Defined ahead of chc__col_read so it
- * can call back into here. */
+ * 0 = Point, 1 = Ring & LineString (Array(Point)), 2 = Polygon (Array(Ring)) &
+ * MultiLineString (Array(LineString)), 3 = MultiPolygon (Array(Polygon)).
+ * Defined ahead of chc__col_read so it can call back into here. */
 static int chc__col_read_geo(chc_in *in, int depth, size_t n_rows,
                              chc_column **out, chc_err *err);
 
@@ -2302,10 +2305,12 @@ chc__col_read(chc_in *in, const chc_type *t,
 
     /* Geo types: aliases for nested Array layers terminating in
      * Tuple(Float64, Float64). Per clickhouse-cpp factory.cpp 120-130. */
-    case CHC_POINT:          return chc__col_read_geo(in, 0, n_rows, out, err);
-    case CHC_RING:           return chc__col_read_geo(in, 1, n_rows, out, err);
-    case CHC_POLYGON:        return chc__col_read_geo(in, 2, n_rows, out, err);
-    case CHC_MULTI_POLYGON:  return chc__col_read_geo(in, 3, n_rows, out, err);
+    case CHC_POINT:              return chc__col_read_geo(in, 0, n_rows, out, err);
+    case CHC_RING:
+    case CHC_LINE_STRING:        return chc__col_read_geo(in, 1, n_rows, out, err);
+    case CHC_POLYGON:
+    case CHC_MULTI_LINE_STRING:  return chc__col_read_geo(in, 2, n_rows, out, err);
+    case CHC_MULTI_POLYGON:      return chc__col_read_geo(in, 3, n_rows, out, err);
 
     case CHC_NOTHING:
     case CHC_VOID: {
@@ -2909,7 +2914,8 @@ static int chc__col_write(chc_io *io, const chc_column *c, const chc_type *t,
                           chc_err *err);
 
 /* Encode geo types as nested Arrays over Tuple(Float64, Float64), mirroring
- * chc__col_read_geo: 0 Point, 1 Ring, 2 Polygon, 3 MultiPolygon */
+ * chc__col_read_geo: 0 Point, 1 Ring & LineString, 2 Polygon &
+ * MultiLineString, 3 MultiPolygon */
 static int
 chc__col_write_geo(chc_io *io, const chc_column *c, int depth, chc_err *err)
 {
@@ -3044,10 +3050,12 @@ chc__col_write(chc_io *io, const chc_column *c, const chc_type *t, chc_err *err)
         if (t->n_children < 1) return chc__col_write_mismatch(err, t);
         return chc__col_write(io, c, t->children[t->n_children - 1], err);
 
-    case CHC_POINT:         return chc__col_write_geo(io, c, 0, err);
-    case CHC_RING:          return chc__col_write_geo(io, c, 1, err);
-    case CHC_POLYGON:       return chc__col_write_geo(io, c, 2, err);
-    case CHC_MULTI_POLYGON: return chc__col_write_geo(io, c, 3, err);
+    case CHC_POINT:             return chc__col_write_geo(io, c, 0, err);
+    case CHC_RING:
+    case CHC_LINE_STRING:       return chc__col_write_geo(io, c, 1, err);
+    case CHC_POLYGON:
+    case CHC_MULTI_LINE_STRING: return chc__col_write_geo(io, c, 2, err);
+    case CHC_MULTI_POLYGON:     return chc__col_write_geo(io, c, 3, err);
 
     case CHC_NOTHING:
     case CHC_VOID: {

@@ -457,6 +457,46 @@ static void test_ring(void) {
     free_block(b);
 }
 
+/* LineString shares Ring's wire shape, Array(Point). */
+static void test_linestring(void) {
+    current_test = "linestring";
+    chc_block *b = read_roundtrip_block(
+        "SELECT [(0.0,0.0),(1.0,2.0)]::LineString AS l");
+    CHECK(b != NULL); if (!b) return;
+    CHECK_EQ_I64(chc_type_kind(chc_block_column_type(b, 0)), CHC_LINE_STRING);
+    const chc_column *c = chc_block_column(b, 0);
+    CHECK(chc_column_layout(c) == CHC_COL_ARRAY);
+    CHECK_EQ_U64(chc_column_array_offsets(c)[0], 2);
+    const chc_column *pt = chc_column_array_values(c);
+    CHECK(chc_column_layout(pt) == CHC_COL_TUPLE);
+    size_t es;
+    const double *x = chc_column_fixed_data(chc_column_tuple_child(pt, 0), &es);
+    const double *y = chc_column_fixed_data(chc_column_tuple_child(pt, 1), &es);
+    CHECK(x[0] == 0.0 && y[0] == 0.0);
+    CHECK(x[1] == 1.0 && y[1] == 2.0);
+    free_block(b);
+}
+
+/* MultiLineString shares Polygon's wire shape, Array(Array(Point)). */
+static void test_multilinestring(void) {
+    current_test = "multilinestring";
+    chc_block *b = read_roundtrip_block(
+        "SELECT [[(0.0,0.0),(1.0,0.0),(0.0,1.0)],"
+        "        [(2.0,2.0),(3.0,3.0)]]::MultiLineString AS ml");
+    CHECK(b != NULL); if (!b) return;
+    CHECK_EQ_I64(
+        chc_type_kind(chc_block_column_type(b, 0)), CHC_MULTI_LINE_STRING);
+    const chc_column *c = chc_block_column(b, 0);
+    CHECK(chc_column_layout(c) == CHC_COL_ARRAY);
+    CHECK_EQ_U64(chc_column_array_offsets(c)[0], 2); /* one row, two lines */
+    const chc_column *line = chc_column_array_values(c);
+    CHECK(chc_column_layout(line) == CHC_COL_ARRAY);
+    const uint64_t *line_offs = chc_column_array_offsets(line);
+    CHECK_EQ_U64(line_offs[0], 3);                     /* line 0: 3 pts */
+    CHECK_EQ_U64(line_offs[1], 5);                     /* line 1: +2 = 5 */
+    free_block(b);
+}
+
 static void test_polygon(void) {
     current_test = "polygon";
     chc_block *b = read_roundtrip_block(
@@ -828,6 +868,12 @@ static void test_type_parse_roundtrip(void) {
         "IPv4",
         "IPv6",
         "Object('json')",
+        "Point",
+        "Ring",
+        "LineString",
+        "Polygon",
+        "MultiPolygon",
+        "MultiLineString",
         "QBit(Float32, 16)",
         "QBit(BFloat16, 8)",
         "QBit(Float64, 1536)",
@@ -1121,8 +1167,10 @@ int main(void) {
     test_date_widths();
     test_point();
     test_ring();
+    test_linestring();
     test_polygon();
     test_multipolygon();
+    test_multilinestring();
     test_json_string();
     test_json_nested();
     test_json_wrong_version();
