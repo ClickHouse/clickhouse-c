@@ -673,6 +673,26 @@ test_write_point(void)
         "SELECT sum(p.1), sum(p.2) FROM table", "4\t30");
 }
 
+/* LineString = Array(Point); exercises the geo writer one Array deep. */
+static void
+test_write_linestring(void)
+{
+    current_test = "write_linestring";
+    /* Rows: [(1,2),(3,4)], [(5,6)]. Point offsets are cumulative. */
+    uint64_t offs[2] = { 2, 3 };
+    double xs[3] = { 1.0, 3.0, 5.0 };
+    double ys[3] = { 2.0, 4.0, 6.0 };
+    chc_column cx = chc_build_fixed(xs, sizeof xs[0], 3);
+    chc_column cy = chc_build_fixed(ys, sizeof ys[0], 3);
+    chc_column *kids[2] = { &cx, &cy };
+    chc_column pt = chc_build_tuple(kids, 2);
+    chc_column line = chc_build_array(offs, 2, &pt);
+    run_column_roundtrip(current_test, "l", "LineString", &line,
+        "SELECT sum(length(l)), sum(arraySum(arrayMap(p -> p.1 + p.2, l))) "
+        "FROM table",
+        "3\t21");
+}
+
 /* Builder path: differing row counts append fine; mismatch surfaces at write. */
 static void
 test_builder_guards(void)
@@ -780,6 +800,7 @@ int main(void)
     test_write_tuple();
     test_write_map();
     test_write_point();
+    test_write_linestring();
     test_builder_guards();
     test_write_cols_direct();
     if (fail_count) {

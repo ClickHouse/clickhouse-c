@@ -421,8 +421,9 @@ chc_column map = chc_build_array(map_offsets, n_rows, &entries);
 ```
 
 Geo types are nested Array / Tuple aliases, also nodeless: `Point` is a 2-arity
-tuple of two `Float64` columns, `Ring` = `Array(Point)`, `Polygon` =
-`Array(Ring)`, `MultiPolygon` = `Array(Polygon)`.
+tuple of two `Float64` columns, `Ring` and `LineString` = `Array(Point)`,
+`Polygon` = `Array(Ring)`, `MultiLineString` = `Array(LineString)`,
+`MultiPolygon` = `Array(Polygon)`.
 
 `LowCardinality(Nullable(T))` uses dict slot 0 as the null sentinel; keys of 0
 decode NULL. Supply the dict inner-typed with a slot-0 placeholder, or a

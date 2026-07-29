@@ -53,6 +53,8 @@ static const row rows[] = {
     {"Nothing",  "CHC_NOTHING"},  {"Void",      "CHC_VOID"},
     {"Point",    "CHC_POINT"},    {"Ring",      "CHC_RING"},
     {"Polygon",  "CHC_POLYGON"},  {"MultiPolygon", "CHC_MULTI_POLYGON"},
+    {"LineString", "CHC_LINE_STRING"},
+    {"MultiLineString", "CHC_MULTI_LINE_STRING"},
     {"SimpleAggregateFunction", "CHC_SIMPLE_AGGREGATE_FUNCTION"},
     {"AggregateFunction",       "CHC_AGGREGATE_FUNCTION"},
     {"Variant",  "CHC_VARIANT"},  {"Dynamic",   "CHC_DYNAMIC"},
