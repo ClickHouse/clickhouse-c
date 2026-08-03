@@ -142,7 +142,7 @@ typedef enum chc_kind {
     CHC_TIME, CHC_TIME64,
     CHC_STRING, CHC_FIXED_STRING,
     CHC_DECIMAL32, CHC_DECIMAL64, CHC_DECIMAL128, CHC_DECIMAL256,
-    CHC_UUID, CHC_IPV4, CHC_IPV6,
+    CHC_UUID, CHC_UUID2, CHC_IPV4, CHC_IPV6,
     CHC_ENUM8, CHC_ENUM16,
     CHC_NULLABLE, CHC_ARRAY, CHC_TUPLE, CHC_MAP, CHC_NESTED,
     CHC_LOW_CARDINALITY,
@@ -456,7 +456,9 @@ For INSERT over TCP, hand builder to `chc_client_send_data` rather than calling
   raw bytes; on BE hosts the caller swaps when reading multi-byte ints.
   Offsets & LowCardinality keys are byte-swapped at decode, safe to
   dereference as host ints on either endianness.
-* **UUID byte order.** CH stores UUID as two LE `UInt64` halves.
+* **UUID byte order.** CH stores UUID as two LE `UInt64` halves. `UUID2`
+  is the 16 canonical big-endian bytes, no swap. `UUID1` parses as an
+  alias of `UUID`.
 * **IPv4 byte order.** 4-byte LE int. IPv6 is NBO — no swap.
 * **DateTime64 timezone is metadata only.** Ticks are UTC.
 * **Decimal precision is implicit.** `Decimal32` = 9 digits, `Decimal64`
