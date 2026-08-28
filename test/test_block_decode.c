@@ -1053,6 +1053,33 @@ static void test_type_parse_numeric_bounds(void) {
     }
 }
 
+/* Parser-only: ClickHouse defaults DateTime64 or Time64 to millisecond scale. */
+static void test_temporal_default_scale(void) {
+    current_test = "temporal_default_scale";
+    chc_alloc al = chc_alloc_stdlib();
+
+    struct { const char *src; chc_kind kind; int scale; } cases[] = {
+        { "DateTime64",              CHC_DATETIME64, 3 },
+        { "DateTime64()",            CHC_DATETIME64, 3 },
+        { "DateTime64(0)",           CHC_DATETIME64, 0 },
+        { "DateTime64(6, 'UTC')",    CHC_DATETIME64, 6 },
+        { "Time64",                  CHC_TIME64,     3 },
+        { "Time64()",                CHC_TIME64,     3 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        chc_type *t = NULL; chc_err err = {};
+        int rc = chc_type_parse(cases[i].src, strlen(cases[i].src), &al, &t, &err);
+        if (rc != CHC_OK) {
+            fprintf(stderr, "%s: parse '%s' failed: %s\n",
+                    current_test, cases[i].src, err.msg);
+            fail_count++; continue;
+        }
+        CHECK_EQ_I64(chc_type_kind(t), cases[i].kind);
+        CHECK_EQ_I64(chc_type_datetime64_scale(t), cases[i].scale);
+        chc_type_destroy(t, &al);
+    }
+}
+
 /* Crafted-bytes decode. The Native wire form of QBit(T, N) is
  * Tuple(FixedString(ceil(N/8)) x bits) with the MSB bit-plane first;
  * the decoder must hand back exactly those planes. */
@@ -1178,6 +1205,7 @@ int main(void) {
     test_invalid_array_overflow();
     test_qbit_parse();
     test_type_parse_numeric_bounds();
+    test_temporal_default_scale();
     test_qbit_decode();
 
     if (fail_count) {

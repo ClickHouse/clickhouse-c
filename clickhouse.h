@@ -1391,6 +1391,10 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
     const char *name_start = head.start;
     const char *name_end   = head.start + head.len;
 
+    /* ClickHouse defaults to milliseconds. */
+    if (t->kind == CHC_DATETIME64 || t->kind == CHC_TIME64)
+        t->temporal.scale = 3;
+
     /* Optional parameter list. */
     if (chc__peek_tok(lx).kind == CHC__TOK_LPAREN) {
         chc__eat_tok(lx);
@@ -1489,20 +1493,22 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
             }
             t->decimal.scale = (int) scale;
         } else if (t->kind == CHC_DATETIME64 || t->kind == CHC_TIME64) {
-            chc__tok num = chc__eat_tok(lx);
-            if (num.kind != CHC__TOK_NUMBER) {
-                chc_type_destroy(t, al);
-                return chc__err_set(err, CHC_ERR_TYPE, "DateTime64: expected precision");
+            if (chc__peek_tok(lx).kind != CHC__TOK_RPAREN) {
+                chc__tok num = chc__eat_tok(lx);
+                if (num.kind != CHC__TOK_NUMBER) {
+                    chc_type_destroy(t, al);
+                    return chc__err_set(err, CHC_ERR_TYPE, "DateTime64: expected precision");
+                }
+                int64_t scale;
+                if (!chc__atoi64(num.start, num.len, &scale)
+                    || scale < 0 || scale > 9) {
+                    chc_type_destroy(t, al);
+                    return chc__err_set(err, CHC_ERR_TYPE,
+                        "DateTime64: precision out of range: %.*s",
+                        (int) num.len, num.start);
+                }
+                t->temporal.scale = (int) scale;
             }
-            int64_t scale;
-            if (!chc__atoi64(num.start, num.len, &scale)
-                || scale < 0 || scale > 9) {
-                chc_type_destroy(t, al);
-                return chc__err_set(err, CHC_ERR_TYPE,
-                    "DateTime64: precision out of range: %.*s",
-                    (int) num.len, num.start);
-            }
-            t->temporal.scale = (int) scale;
             if (chc__peek_tok(lx).kind == CHC__TOK_COMMA) {
                 chc__eat_tok(lx);
                 chc__tok s = chc__eat_tok(lx);
