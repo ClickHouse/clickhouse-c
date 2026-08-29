@@ -981,6 +981,64 @@ static void test_qbit_parse(void) {
     }
 }
 
+/* Parser-only: Interval names carry their unit, unknown names still rejected. */
+static void test_interval_units(void) {
+    current_test = "interval_units";
+    chc_alloc al = chc_alloc_stdlib();
+
+    struct { const char *src; chc_interval_unit unit; } cases[] = {
+        { "IntervalNanosecond",  CHC_INTERVAL_NANOSECOND  },
+        { "IntervalMicrosecond", CHC_INTERVAL_MICROSECOND },
+        { "IntervalMillisecond", CHC_INTERVAL_MILLISECOND },
+        { "IntervalSecond",      CHC_INTERVAL_SECOND      },
+        { "IntervalMinute",      CHC_INTERVAL_MINUTE      },
+        { "IntervalHour",        CHC_INTERVAL_HOUR        },
+        { "IntervalDay",         CHC_INTERVAL_DAY         },
+        { "IntervalWeek",        CHC_INTERVAL_WEEK        },
+        { "IntervalMonth",       CHC_INTERVAL_MONTH       },
+        { "IntervalQuarter",     CHC_INTERVAL_QUARTER     },
+        { "IntervalYear",        CHC_INTERVAL_YEAR        },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        chc_type *t = NULL; chc_err err = {};
+        int rc = chc_type_parse(cases[i].src, strlen(cases[i].src), &al, &t, &err);
+        if (rc != CHC_OK) {
+            fprintf(stderr, "%s: parse '%s' failed: %s\n",
+                    current_test, cases[i].src, err.msg);
+            fail_count++; continue;
+        }
+        CHECK_EQ_I64(chc_type_kind(t), CHC_INTERVAL);
+        CHECK_EQ_I64(chc_type_interval_unit(t), cases[i].unit);
+        CHECK_EQ_U64(chc_type_elem_size(t), 8);
+        chc_type_destroy(t, &al);
+    }
+
+    /* Nesting keeps the unit; other kinds & unknown names report none. */
+    struct { const char *src; chc_kind kind; chc_interval_unit unit; } other[] = {
+        { "Nullable(IntervalDay)", CHC_NULLABLE, CHC_INTERVAL_DAY  },
+        { "Int64",                 CHC_INT64,    CHC_INTERVAL_NONE },
+        { "Void",                  CHC_VOID,     CHC_INTERVAL_NONE },
+    };
+    for (size_t i = 0; i < sizeof other / sizeof other[0]; i++) {
+        chc_type *t = NULL; chc_err err = {};
+        int rc = chc_type_parse(other[i].src, strlen(other[i].src), &al, &t, &err);
+        if (rc != CHC_OK) {
+            fprintf(stderr, "%s: parse '%s' failed: %s\n",
+                    current_test, other[i].src, err.msg);
+            fail_count++; continue;
+        }
+        CHECK_EQ_I64(chc_type_kind(t), other[i].kind);
+        const chc_type *leaf = other[i].kind == CHC_NULLABLE ? chc_type_child(t, 0) : t;
+        CHECK_EQ_I64(chc_type_interval_unit(leaf), other[i].unit);
+        chc_type_destroy(t, &al);
+    }
+
+    chc_type *t = NULL; chc_err err = {};
+    CHECK(chc_type_parse("Intervals", 9, &al, &t, &err) == CHC_ERR_TYPE);
+    CHECK(strstr(err.msg, "unknown type") != NULL);
+    if (t) chc_type_destroy(t, &al);
+}
+
 /* Parser-only: numeric type parameters are range-checked, oversized digit
  * runs rejected before int64 accumulation can overflow (signed overflow UB
  * pre-fix, eg FixedString(99999999999999999999)). */
@@ -1177,6 +1235,7 @@ int main(void) {
     test_column_validate();
     test_invalid_array_overflow();
     test_qbit_parse();
+    test_interval_units();
     test_type_parse_numeric_bounds();
     test_qbit_decode();
 

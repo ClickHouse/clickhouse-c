@@ -1,8 +1,8 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Regenerate the perfect-hash table inside chc__name_to_kind.
 # Edits clickhouse.h in place between the sentinel comments.
 
-set -euo pipefail
+set -eu
 cd "$(dirname "$0")/.."
 
 gen=/tmp/chc_gen_name_table

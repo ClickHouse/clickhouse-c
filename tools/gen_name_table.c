@@ -18,6 +18,7 @@
 #define CHC_IMPLEMENTATION
 #include "../clickhouse.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -73,6 +74,17 @@ static const row rows[] = {
     {"IntervalYear",        "CHC_INTERVAL"},
 };
 
+/* Interval rows carry their unit, IntervalDay giving CHC_INTERVAL_DAY.
+ * NULL on every other row, leaving unit zero -> CHC_INTERVAL_NONE. */
+static const char *unit_of(const char *name)
+{
+    static char buf[64];
+    if (strncmp(name, "Interval", 8) != 0) return NULL;
+    int n = snprintf(buf, sizeof buf, "CHC_INTERVAL_%s", name + 8);
+    for (int i = 13; i < n; i++) buf[i] = (char) toupper((unsigned char) buf[i]);
+    return buf;
+}
+
 static uint64_t key_of(const char *s, size_t n, uint64_t seed)
 {
     size_t h_len = n < 16 ? n : 16;
@@ -119,7 +131,8 @@ int main(void)
 
     printf("#define CHC__NAME_TABLE_M %zuu\n", M);
     printf("#define CHC__NAME_TABLE_SEED %lluull\n", (unsigned long long) seed);
-    printf("struct chc__name_row { const char *name; chc_kind kind; };\n");
+    printf("struct chc__name_row { const char *name; uint8_t kind;"
+           " uint8_t unit; };\n");
     printf("static const struct chc__name_row chc__name_table[CHC__NAME_TABLE_M] = {\n");
 
     int *slot = malloc(M * sizeof *slot);
@@ -132,8 +145,10 @@ int main(void)
     for (size_t b = 0; b < M; b++) {
         int i = slot[b];
         if (i >= 0) {
-            printf("    [%3zu] = {\"%s\", %s},\n",
-                   b, rows[i].name, rows[i].kind);
+            const char *unit = unit_of(rows[i].name);
+            printf("    [%3zu] = {\"%s\", %s", b, rows[i].name, rows[i].kind);
+            if (unit) printf(", %s", unit);
+            printf("},\n");
         }
     }
     printf("};\n");
