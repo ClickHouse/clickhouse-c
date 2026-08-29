@@ -177,6 +177,7 @@ int              chc_type_fixed_size        (const chc_type *t);
 int              chc_type_decimal_precision (const chc_type *t);
 int              chc_type_decimal_scale     (const chc_type *t);
 int              chc_type_datetime64_scale  (const chc_type *t);
+chc_interval_unit chc_type_interval_unit    (const chc_type *t);
 size_t           chc_type_qbit_dimension    (const chc_type *t);
 size_t           chc_type_qbit_element_size (const chc_type *t);
 const char      *chc_type_timezone          (const chc_type *t, size_t *out_len);
@@ -201,6 +202,9 @@ allocate & call again.
 32/64/128/256-bit. `chc_type_decimal_scale` returns the explicit `S`.
 
 `DateTime64` timezone is metadata only; ticks on the wire are UTC.
+
+Every `Interval*` type maps to `CHC_INTERVAL`; `chc_type_interval_unit` tells
+which unit, from `CHC_INTERVAL_NANOSECOND` to `CHC_INTERVAL_YEAR`.
 
 `QBit(T, N)` is a bit-sliced vector type. `chc_type_qbit_dimension` is `N`;
 `chc_type_qbit_element_size` is the element width in bits (16 / 32 / 64 for
