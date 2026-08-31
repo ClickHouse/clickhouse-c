@@ -1255,73 +1255,96 @@ chc__atoi64(const char *s, size_t n, int64_t *out)
 /* AUTO-GENERATED-NAME-TABLE-BEGIN -- regenerate via tools/regen_name_table.sh */
 #define CHC__NAME_TABLE_M 256u
 #define CHC__NAME_TABLE_SEED 5935ull
-struct chc__name_row { const char *name; uint8_t kind; uint8_t unit; };
-static const struct chc__name_row chc__name_table[CHC__NAME_TABLE_M] = {
-    [  2] = {"Ring", CHC_RING},
-    [  6] = {"Tuple", CHC_TUPLE},
-    [  9] = {"IntervalHour", CHC_INTERVAL, CHC_INTERVAL_HOUR},
-    [ 27] = {"UInt8", CHC_UINT8},
-    [ 29] = {"Nothing", CHC_NOTHING},
-    [ 36] = {"Object", CHC_OBJECT},
-    [ 39] = {"Void", CHC_VOID},
-    [ 42] = {"IntervalYear", CHC_INTERVAL, CHC_INTERVAL_YEAR},
-    [ 45] = {"Nullable", CHC_NULLABLE},
-    [ 51] = {"Enum8", CHC_ENUM8},
-    [ 52] = {"LineString", CHC_LINE_STRING},
-    [ 59] = {"Bool", CHC_BOOL},
-    [ 67] = {"FixedString", CHC_FIXED_STRING},
-    [ 68] = {"Enum16", CHC_ENUM16},
-    [ 71] = {"Int16", CHC_INT16},
-    [ 72] = {"IntervalDay", CHC_INTERVAL, CHC_INTERVAL_DAY},
-    [ 73] = {"UUID", CHC_UUID},
-    [ 80] = {"AggregateFunction", CHC_AGGREGATE_FUNCTION},
-    [ 81] = {"DateTime64", CHC_DATETIME64},
-    [ 85] = {"MultiPolygon", CHC_MULTI_POLYGON},
-    [ 86] = {"IntervalQuarter", CHC_INTERVAL, CHC_INTERVAL_QUARTER},
-    [ 97] = {"Decimal64", CHC_DECIMAL64},
-    [ 98] = {"Array", CHC_ARRAY},
-    [107] = {"Time64", CHC_TIME64},
-    [109] = {"LowCardinality", CHC_LOW_CARDINALITY},
-    [111] = {"QBit", CHC_QBIT},
-    [112] = {"IntervalNanosecond", CHC_INTERVAL, CHC_INTERVAL_NANOSECOND},
-    [113] = {"Int64", CHC_INT64},
-    [118] = {"UInt32", CHC_UINT32},
-    [123] = {"IntervalMillisecond", CHC_INTERVAL, CHC_INTERVAL_MILLISECOND},
-    [126] = {"MultiLineString", CHC_MULTI_LINE_STRING},
-    [127] = {"UInt128", CHC_UINT128},
-    [129] = {"DateTime", CHC_DATETIME},
-    [133] = {"IntervalMinute", CHC_INTERVAL, CHC_INTERVAL_MINUTE},
-    [134] = {"Date", CHC_DATE},
-    [137] = {"IntervalSecond", CHC_INTERVAL, CHC_INTERVAL_SECOND},
-    [138] = {"String", CHC_STRING},
-    [139] = {"Date32", CHC_DATE32},
-    [141] = {"IPv6", CHC_IPV6},
-    [142] = {"Point", CHC_POINT},
-    [151] = {"IntervalMonth", CHC_INTERVAL, CHC_INTERVAL_MONTH},
-    [153] = {"Time", CHC_TIME},
-    [154] = {"Float32", CHC_FLOAT32},
-    [159] = {"Int8", CHC_INT8},
-    [160] = {"BFloat16", CHC_BFLOAT16},
-    [168] = {"Variant", CHC_VARIANT},
-    [170] = {"Decimal256", CHC_DECIMAL256},
-    [173] = {"SimpleAggregateFunction", CHC_SIMPLE_AGGREGATE_FUNCTION},
-    [174] = {"Map", CHC_MAP},
-    [175] = {"Decimal32", CHC_DECIMAL32},
-    [176] = {"IntervalWeek", CHC_INTERVAL, CHC_INTERVAL_WEEK},
-    [180] = {"JSON", CHC_JSON},
-    [192] = {"Float64", CHC_FLOAT64},
-    [202] = {"Int128", CHC_INT128},
-    [204] = {"Int256", CHC_INT256},
-    [205] = {"Nested", CHC_NESTED},
-    [206] = {"Int32", CHC_INT32},
-    [215] = {"Polygon", CHC_POLYGON},
-    [223] = {"UInt256", CHC_UINT256},
-    [226] = {"UInt16", CHC_UINT16},
-    [238] = {"UInt64", CHC_UINT64},
-    [240] = {"IntervalMicrosecond", CHC_INTERVAL, CHC_INTERVAL_MICROSECOND},
-    [247] = {"IPv4", CHC_IPV4},
-    [251] = {"Dynamic", CHC_DYNAMIC},
-    [252] = {"Decimal128", CHC_DECIMAL128},
+#define CHC__NAME_TABLE_MAXLEN 23u
+struct chc__name_row { uint16_t off; uint8_t len; uint8_t kind; uint8_t unit; };
+static const char chc__name_blob[] =
+    "SimpleAggregateFunctionIntervalMicrosecondIntervalMillisecondInt"
+    "ervalNanosecondMultiLineStringIntervalQuarterLowCardinalityInter"
+    "valSecondIntervalMinuteIntervalMonthMultiPolygonIntervalHourInte"
+    "rvalWeekIntervalYearFixedStringIntervalDayDateTime64Decimal128De"
+    "cimal256Decimal32Decimal64BFloat16NullableUInt128UInt256Float32F"
+    "loat64NothingVariantDynamicUInt16UInt32UInt64Date32Enum16NestedO"
+    "bjectUInt8Enum8ArrayTuplePointBoolUUIDIPv4IPv6VoidRingJSONQBitMa"
+    "p";
+static const struct chc__name_row chc__name_rows[] = {
+    {390,  4, CHC_INT8, CHC_INTERVAL_NONE},
+    {348,  5, CHC_INT16, CHC_INTERVAL_NONE},
+    {354,  5, CHC_INT32, CHC_INTERVAL_NONE},
+    {360,  5, CHC_INT64, CHC_INTERVAL_NONE},
+    {299,  6, CHC_INT128, CHC_INTERVAL_NONE},
+    {306,  6, CHC_INT256, CHC_INTERVAL_NONE},
+    {389,  5, CHC_UINT8, CHC_INTERVAL_NONE},
+    {347,  6, CHC_UINT16, CHC_INTERVAL_NONE},
+    {353,  6, CHC_UINT32, CHC_INTERVAL_NONE},
+    {359,  6, CHC_UINT64, CHC_INTERVAL_NONE},
+    {298,  7, CHC_UINT128, CHC_INTERVAL_NONE},
+    {305,  7, CHC_UINT256, CHC_INTERVAL_NONE},
+    {312,  7, CHC_FLOAT32, CHC_INTERVAL_NONE},
+    {319,  7, CHC_FLOAT64, CHC_INTERVAL_NONE},
+    {282,  8, CHC_BFLOAT16, CHC_INTERVAL_NONE},
+    {414,  4, CHC_BOOL, CHC_INTERVAL_NONE},
+    { 88,  6, CHC_STRING, CHC_INTERVAL_NONE},
+    {212, 11, CHC_FIXED_STRING, CHC_INTERVAL_NONE},
+    {234,  4, CHC_DATE, CHC_INTERVAL_NONE},
+    {365,  6, CHC_DATE32, CHC_INTERVAL_NONE},
+    {234,  8, CHC_DATETIME, CHC_INTERVAL_NONE},
+    {234, 10, CHC_DATETIME64, CHC_INTERVAL_NONE},
+    {238,  4, CHC_TIME, CHC_INTERVAL_NONE},
+    {238,  6, CHC_TIME64, CHC_INTERVAL_NONE},
+    {418,  4, CHC_UUID, CHC_INTERVAL_NONE},
+    {422,  4, CHC_IPV4, CHC_INTERVAL_NONE},
+    {426,  4, CHC_IPV6, CHC_INTERVAL_NONE},
+    {394,  5, CHC_ENUM8, CHC_INTERVAL_NONE},
+    {371,  6, CHC_ENUM16, CHC_INTERVAL_NONE},
+    {264,  9, CHC_DECIMAL32, CHC_INTERVAL_NONE},
+    {273,  9, CHC_DECIMAL64, CHC_INTERVAL_NONE},
+    {244, 10, CHC_DECIMAL128, CHC_INTERVAL_NONE},
+    {254, 10, CHC_DECIMAL256, CHC_INTERVAL_NONE},
+    {290,  8, CHC_NULLABLE, CHC_INTERVAL_NONE},
+    {399,  5, CHC_ARRAY, CHC_INTERVAL_NONE},
+    {404,  5, CHC_TUPLE, CHC_INTERVAL_NONE},
+    {446,  3, CHC_MAP, CHC_INTERVAL_NONE},
+    {377,  6, CHC_NESTED, CHC_INTERVAL_NONE},
+    {109, 14, CHC_LOW_CARDINALITY, CHC_INTERVAL_NONE},
+    {326,  7, CHC_NOTHING, CHC_INTERVAL_NONE},
+    {430,  4, CHC_VOID, CHC_INTERVAL_NONE},
+    {409,  5, CHC_POINT, CHC_INTERVAL_NONE},
+    {434,  4, CHC_RING, CHC_INTERVAL_NONE},
+    {169,  7, CHC_POLYGON, CHC_INTERVAL_NONE},
+    {164, 12, CHC_MULTI_POLYGON, CHC_INTERVAL_NONE},
+    { 84, 10, CHC_LINE_STRING, CHC_INTERVAL_NONE},
+    { 79, 15, CHC_MULTI_LINE_STRING, CHC_INTERVAL_NONE},
+    {  0, 23, CHC_SIMPLE_AGGREGATE_FUNCTION, CHC_INTERVAL_NONE},
+    {  6, 17, CHC_AGGREGATE_FUNCTION, CHC_INTERVAL_NONE},
+    {333,  7, CHC_VARIANT, CHC_INTERVAL_NONE},
+    {340,  7, CHC_DYNAMIC, CHC_INTERVAL_NONE},
+    {438,  4, CHC_JSON, CHC_INTERVAL_NONE},
+    {383,  6, CHC_OBJECT, CHC_INTERVAL_NONE},
+    {442,  4, CHC_QBIT, CHC_INTERVAL_NONE},
+    { 61, 18, CHC_INTERVAL, CHC_INTERVAL_NANOSECOND},
+    { 23, 19, CHC_INTERVAL, CHC_INTERVAL_MICROSECOND},
+    { 42, 19, CHC_INTERVAL, CHC_INTERVAL_MILLISECOND},
+    {123, 14, CHC_INTERVAL, CHC_INTERVAL_SECOND},
+    {137, 14, CHC_INTERVAL, CHC_INTERVAL_MINUTE},
+    {176, 12, CHC_INTERVAL, CHC_INTERVAL_HOUR},
+    {223, 11, CHC_INTERVAL, CHC_INTERVAL_DAY},
+    {188, 12, CHC_INTERVAL, CHC_INTERVAL_WEEK},
+    {151, 13, CHC_INTERVAL, CHC_INTERVAL_MONTH},
+    { 94, 15, CHC_INTERVAL, CHC_INTERVAL_QUARTER},
+    {200, 12, CHC_INTERVAL, CHC_INTERVAL_YEAR},
+};
+static const uint8_t chc__name_slot[CHC__NAME_TABLE_M] = {
+    [  2] = 43, [  6] = 36, [  9] = 60, [ 27] =  7, [ 29] = 40, [ 36] = 53,
+    [ 39] = 41, [ 42] = 65, [ 45] = 34, [ 51] = 28, [ 52] = 46, [ 59] = 16,
+    [ 67] = 18, [ 68] = 29, [ 71] =  2, [ 72] = 61, [ 73] = 25, [ 80] = 49,
+    [ 81] = 22, [ 85] = 45, [ 86] = 64, [ 97] = 31, [ 98] = 35, [107] = 24,
+    [109] = 39, [111] = 54, [112] = 55, [113] =  4, [118] =  9, [123] = 57,
+    [126] = 47, [127] = 11, [129] = 21, [133] = 59, [134] = 19, [137] = 58,
+    [138] = 17, [139] = 20, [141] = 27, [142] = 42, [151] = 63, [153] = 23,
+    [154] = 13, [159] =  1, [160] = 15, [168] = 50, [170] = 33, [173] = 48,
+    [174] = 37, [175] = 30, [176] = 62, [180] = 52, [192] = 14, [202] =  5,
+    [204] =  6, [205] = 38, [206] =  3, [215] = 44, [223] = 12, [226] =  8,
+    [238] = 10, [240] = 56, [247] = 26, [251] = 51, [252] = 32,
 };
 /* AUTO-GENERATED-NAME-TABLE-END */
 
@@ -1330,13 +1353,15 @@ static const struct chc__name_row chc__name_table[CHC__NAME_TABLE_M] = {
 static const struct chc__name_row *
 chc__name_lookup(const char *s, size_t n) CHC_REPRODUCIBLE
 {
-    if (n == 0 || n > 23) return NULL;
+    if (n == 0 || n > CHC__NAME_TABLE_MAXLEN) return NULL;
     size_t h_len = n < 16 ? n : 16;
     uint64_t h = chc__city_hash_len_16(
         chc__city_hash_len_0_to_16(s, h_len) + (uint64_t) n,
         CHC__NAME_TABLE_SEED);
-    const struct chc__name_row *r = &chc__name_table[h & (CHC__NAME_TABLE_M - 1)];
-    return (r->name && strlen(r->name) == n && memcmp(r->name, s, n) == 0) ? r : NULL;
+    uint8_t i = chc__name_slot[h & (CHC__NAME_TABLE_M - 1)];
+    if (!i) return NULL;
+    const struct chc__name_row *r = &chc__name_rows[i - 1];
+    return (r->len == n && memcmp(chc__name_blob + r->off, s, n) == 0) ? r : NULL;
 }
 
 static int chc__parse_type(chc__lex *lx, const chc_alloc *al,
