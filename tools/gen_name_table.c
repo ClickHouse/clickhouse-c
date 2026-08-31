@@ -2,8 +2,8 @@
  * hash table. Compiled & run by tools/regen_name_table.sh, never linked
  * into the library.
  *
- * Output: a C array initializer plus a CHC__NAME_TABLE_M #define,
- * intended to be spliced into clickhouse.h between the
+ * Output: the table's #defines, storage & row array, intended to be
+ * spliced into clickhouse.h between the
  *   AUTO-GENERATED-NAME-TABLE-{BEGIN,END}
  * sentinel comments.
  *
@@ -13,6 +13,11 @@
  *
  * Strategy: try M = 64, 128, 256, ... until no two entries collide
  * on the same bucket. Emit the smallest M that works.
+ *
+ * Layout: names pack into one blob, rows hold {offset, length, kind,
+ * unit}, buckets hold a 1-based uint8_t row index (0 = empty). Keeps the
+ * M-sized array 1 byte per bucket & leaves the table free of pointers,
+ * so it needs no load-time relocation.
  */
 
 #define CHC_IMPLEMENTATION
@@ -74,15 +79,45 @@ static const row rows[] = {
     {"IntervalYear",        "CHC_INTERVAL"},
 };
 
-/* Interval rows carry their unit, IntervalDay giving CHC_INTERVAL_DAY.
- * NULL on every other row, leaving unit zero -> CHC_INTERVAL_NONE. */
+/* Interval rows carry their unit, IntervalDay giving CHC_INTERVAL_DAY. */
 static const char *unit_of(const char *name)
 {
     static char buf[64];
-    if (strncmp(name, "Interval", 8) != 0) return NULL;
+    if (strncmp(name, "Interval", 8) != 0) return "CHC_INTERVAL_NONE";
     int n = snprintf(buf, sizeof buf, "CHC_INTERVAL_%s", name + 8);
     for (int i = 13; i < n; i++) buf[i] = (char) toupper((unsigned char) buf[i]);
     return buf;
+}
+
+/* Rows address the blob by offset+length, so a name already spelled out
+ * inside another costs nothing. Placing longest first puts Int8 inside
+ * UInt8, String inside FixedString, AggregateFunction inside
+ * SimpleAggregateFunction. */
+static char blob[4096];
+static size_t blob_len;
+
+static size_t blob_place(const char *name)
+{
+    size_t nlen = strlen(name);
+    blob[blob_len] = '\0';
+    const char *hit = strstr(blob, name);
+    if (hit) return (size_t) (hit - blob);
+
+    if (blob_len + nlen >= sizeof blob) {
+        fprintf(stderr, "gen_name_table: blob overflow\n");
+        exit(1);
+    }
+    memcpy(blob + blob_len, name, nlen);
+    blob_len += nlen;
+    return blob_len - nlen;
+}
+
+static int by_len_desc(const void *a, const void *b)
+{
+    int ia = *(const int *) a, ib = *(const int *) b;
+    size_t la = strlen(rows[ia].name), lb = strlen(rows[ib].name);
+    if (la != lb) return la < lb ? 1 : -1;
+    return ia < ib ? -1 : 1;
 }
 
 static uint64_t key_of(const char *s, size_t n, uint64_t seed)
@@ -129,11 +164,57 @@ int main(void)
     fprintf(stderr, "gen_name_table: %zu entries, M=%zu, seed=%llu\n",
             n_rows, M, (unsigned long long) seed);
 
+    if (n_rows > 254) {
+        fprintf(stderr, "gen_name_table: too many rows for uint8_t index\n");
+        return 1;
+    }
+
+    size_t maxlen = 0;
+    int *order = malloc(n_rows * sizeof *order);
+    size_t *off = malloc(n_rows * sizeof *off);
+    for (size_t i = 0; i < n_rows; i++) {
+        size_t nlen = strlen(rows[i].name);
+        if (nlen > maxlen) maxlen = nlen;
+        order[i] = (int) i;
+    }
+    qsort(order, n_rows, sizeof *order, by_len_desc);
+    for (size_t k = 0; k < n_rows; k++)
+        off[order[k]] = blob_place(rows[order[k]].name);
+    for (size_t i = 0; i < n_rows; i++) {
+        size_t nlen = strlen(rows[i].name);
+        if (off[i] + nlen > blob_len
+            || memcmp(blob + off[i], rows[i].name, nlen) != 0) {
+            fprintf(stderr, "gen_name_table: %s misplaced in blob\n",
+                    rows[i].name);
+            return 1;
+        }
+    }
+    if (blob_len > 65535) {
+        fprintf(stderr, "gen_name_table: blob too large for uint16_t off\n");
+        return 1;
+    }
+    fprintf(stderr, "gen_name_table: blob %zu bytes\n", blob_len);
+
     printf("#define CHC__NAME_TABLE_M %zuu\n", M);
     printf("#define CHC__NAME_TABLE_SEED %lluull\n", (unsigned long long) seed);
-    printf("struct chc__name_row { const char *name; uint8_t kind;"
+    printf("#define CHC__NAME_TABLE_MAXLEN %zuu\n", maxlen);
+    printf("struct chc__name_row { uint16_t off; uint8_t len; uint8_t kind;"
            " uint8_t unit; };\n");
-    printf("static const struct chc__name_row chc__name_table[CHC__NAME_TABLE_M] = {\n");
+
+    printf("static const char chc__name_blob[] =\n");
+    for (size_t i = 0; i < blob_len; i += 64) {
+        size_t k = blob_len - i < 64 ? blob_len - i : 64;
+        printf("    \"%.*s\"%s\n", (int) k, blob + i,
+               i + k >= blob_len ? ";" : "");
+    }
+
+    printf("static const struct chc__name_row chc__name_rows[] = {\n");
+    for (size_t i = 0; i < n_rows; i++)
+        printf("    {%3zu, %2zu, %s, %s},\n", off[i], strlen(rows[i].name),
+               rows[i].kind, unit_of(rows[i].name));
+    printf("};\n");
+    free(order);
+    free(off);
 
     int *slot = malloc(M * sizeof *slot);
     for (size_t i = 0; i < M; i++) slot[i] = -1;
@@ -142,16 +223,14 @@ int main(void)
         uint64_t h = key_of(rows[i].name, nlen, seed);
         slot[h & (M - 1)] = (int) i;
     }
-    for (size_t b = 0; b < M; b++) {
-        int i = slot[b];
-        if (i >= 0) {
-            const char *unit = unit_of(rows[i].name);
-            printf("    [%3zu] = {\"%s\", %s", b, rows[i].name, rows[i].kind);
-            if (unit) printf(", %s", unit);
-            printf("},\n");
-        }
+    printf("static const uint8_t chc__name_slot[CHC__NAME_TABLE_M] = {\n   ");
+    for (size_t b = 0, col = 0; b < M; b++) {
+        if (slot[b] < 0) continue;
+        if (col == 6) { printf("\n   "); col = 0; }
+        printf(" [%3zu] = %2d,", b, slot[b] + 1);
+        col++;
     }
-    printf("};\n");
+    printf("\n};\n");
     free(slot);
     return 0;
 }
