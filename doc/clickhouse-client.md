@@ -43,7 +43,8 @@ typedef struct chc_server_info {
 typedef struct chc_client chc_client;
 
 int  chc_client_init        (chc_client **out, const chc_client_opts *opts,
-                             const chc_alloc *al, chc_io *io, chc_err *err);
+                             const chc_alloc *al, chc_io *io,
+                             chc_exception **exc, chc_err *err);
 void chc_client_close       (chc_client *c);
 const chc_server_info *chc_client_server_info(const chc_client *c);
 ```
@@ -53,6 +54,11 @@ caller may still pass the returned (NULL-on-fail) handle to
 `chc_client_close`. The effective revision (min of client & server) is
 exposed via `chc_client_server_info` and used to gate optional fields on
 every later packet.
+
+`chc_client_init` returns `CHC_ERR_SERVER` when server rejects handshake. If
+`exc` is not NULL, caller owns `*exc` and frees it with
+[`chc_exception_free`](#receive). `err->msg` stays empty. Other results leave
+`*exc` unchanged. Query exceptions arrive as `CHC_PKT_EXCEPTION` with `CHC_OK`.
 
 Compression: pass `compression = CHC_COMP_LZ4`/`CHC_COMP_ZSTD` plus a
 filled `codec`. The client uncompresses incoming Data packets & compresses

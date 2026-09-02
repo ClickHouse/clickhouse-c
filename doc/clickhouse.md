@@ -24,9 +24,7 @@ enum {
 };
 
 typedef struct chc_err {
-    int  server_code;                /* set when the return code is CHC_ERR_SERVER */
     char msg[CHC_ERR_MSG_LEN];       /* default 256, NUL-terminated, snprintf-truncated */
-    char server_name[64];            /* CH exception class, if SERVER */
 } chc_err;
 
 static inline void chc_err_reset(chc_err *e);
@@ -34,6 +32,9 @@ static inline void chc_err_reset(chc_err *e);
 
 Caller-stack-allocated; library never heap-allocates an error. Override
 `CHC_ERR_MSG_LEN` before including to resize `msg`.
+
+`chc_err` is for errors. Server exceptions use
+[`chc_exception`](clickhouse-client.md#receive).
 
 `CHC_WOULD_BLOCK` is not a failure: an ioless [buffered reader](#buffered-reader)
 returns it when a parse runs past the submitted bytes. Submit more and retry.

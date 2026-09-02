@@ -195,10 +195,18 @@ pump(loop_ctx *L, chc_err *err)
 static int
 do_handshake(loop_ctx *L, chc_err *err)
 {
+    chc_exception *exc = NULL;
     for (int i = 0; i < 100000; i++) {
-        int rc = chc_async_handshake(L->cli, err);
+        int rc = chc_async_handshake(L->cli, &exc, err);
         if (rc == CHC_OK) return CHC_OK;
-        if (rc != CHC_WOULD_BLOCK) return rc;
+        if (rc != CHC_WOULD_BLOCK) {
+            if (exc) {  /* Preserve test diagnostics */
+                chc__err_set(err, CHC_ERR_SERVER, "%s",
+                             exc->display_text ? exc->display_text : "");
+                chc_exception_free(exc, &L->al);
+            }
+            return rc;
+        }
         if (pump(L, err) != 0) return CHC_ERR_IO;
         if (L->eof) return chc__err_set(err, CHC_ERR_EOF, "eof during handshake");
     }

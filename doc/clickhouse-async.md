@@ -60,7 +60,8 @@ outlive the call.
 ## Drive
 
 ```c
-int  chc_async_handshake    (chc_async_client *c, chc_err *err);
+int  chc_async_handshake    (chc_async_client *c, chc_exception **exc,
+                             chc_err *err);
 int  chc_async_send_query   (chc_async_client *c,
                              const char *sql,      size_t sql_len,
                              const char *query_id, size_t query_id_len,
@@ -81,6 +82,10 @@ granularity: at most one frame is re-decompressed and one column re-parsed.
 
 * `chc_async_handshake` runs the Hello / Pong exchange as a resumable state
   machine. Call it after init, re-driving on `CHC_WOULD_BLOCK`, until `CHC_OK`.
+  Handshake rejection returns `CHC_ERR_SERVER` and leaves `err->msg` empty.
+  When `exc` is not NULL, caller owns `*exc` and frees it with
+  [`chc_exception_free`](clickhouse-client.md#receive). Other results leave
+  `*exc` unchanged.
 * `send_query` / `send_data` only append to the out buffer; they never block.
   `send_data(bb)` appends a Data block; `send_data_end` appends the empty
   terminating block that ends an INSERT stream. Semantics mirror
@@ -101,9 +106,15 @@ chc_async_client *c;
 chc_async_client_init(&c, &opts, &al, &err);
 
 /* handshake */
+chc_exception *exc = NULL;
 for (;;) {
-    int rc = chc_async_handshake(c, &err);
+    int rc = chc_async_handshake(c, &exc, &err);
     if (rc == CHC_OK) break;
+    if (rc == CHC_ERR_SERVER) {
+        fprintf(stderr, "handshake: %s\n", exc->display_text);
+        chc_exception_free(exc, &al);
+        goto fail;
+    }
     if (rc != CHC_WOULD_BLOCK) goto fail;
     pump(c);              /* drain pending_out -> socket; recv -> submit */
 }

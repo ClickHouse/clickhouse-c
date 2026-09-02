@@ -109,8 +109,12 @@ chc_client_opts opts = {
     .database = "default",
 };
 chc_err err = {};
-if (chc_client_init(&client, &opts, &al, &io, &err) != CHC_OK) {
-    fprintf(stderr, "connect: %s\n", err.msg);
+chc_exception *exc = NULL;
+int rc = chc_client_init(&client, &opts, &al, &io, &exc, &err);
+if (rc != CHC_OK) {
+    fprintf(stderr, "connect: %s\n", rc == CHC_ERR_SERVER ? exc->display_text
+                                                          : err.msg);
+    chc_exception_free(exc, &al);
     chc_client_close(client);   /* safe to call on the NULL-on-failure handle */
     return 1;
 }
@@ -373,11 +377,19 @@ chc_async_client *c = NULL;
 chc_client_opts opts = { .user = "default" };
 chc_async_client_init(&c, &opts, &al, &err);
 
+chc_exception *exc = NULL;
+int rc;
 for (;;) {
-    int rc = chc_async_handshake(c, &err);
+    rc = chc_async_handshake(c, &exc, &err);
     if (rc == CHC_OK) break;
-    if (rc != CHC_WOULD_BLOCK) break;   /* hard error */
+    if (rc != CHC_WOULD_BLOCK) break;
     pump(c);   /* drain pending_out to the socket; feed received bytes to chc_async_submit */
+}
+if (rc != CHC_OK) {
+    fprintf(stderr, "handshake: %s\n", exc ? exc->display_text : err.msg);
+    chc_exception_free(exc, &al);
+    chc_async_client_free(c);
+    return 1;
 }
 
 chc_async_send_query(c, sql, strlen(sql), "", 0, &err);
@@ -427,15 +439,16 @@ an error.
 
 ```c
 typedef struct chc_err {
-    int  server_code;           /* set when the return code is CHC_ERR_SERVER */
     char msg[CHC_ERR_MSG_LEN];  /* NUL-terminated, default 256 bytes */
-    char server_name[64];       /* ClickHouse exception class, if SERVER */
 } chc_err;
 ```
 
 Server-side query errors aren't `chc_err` failures. They arrive on the packet stream as
 `CHC_PKT_EXCEPTION`, carrying the server's `code`, `display_text`, and `stack_trace`. Reserve
 `chc_err` checking for transport, protocol, and decode failures.
+
+Handshake rejection returns `CHC_ERR_SERVER` and leaves `err.msg` empty. When `exc` is not NULL,
+caller owns `*exc` and frees it with `chc_exception_free`. Pass `NULL` to discard exception details.
 
 ## Supported data types {#supported-types}
 

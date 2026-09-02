@@ -330,7 +330,7 @@ test_handshake_chunked(void)
         size_t fed = 0;
         int done = 0;
         for (int iter = 0; iter < 100000 && !done; iter++) {
-            int rc = chc_async_handshake(c, &e);
+            int rc = chc_async_handshake(c, NULL, &e);
             if (rc == CHC_OK) { done = 1; break; }
             if (rc == CHC_WOULD_BLOCK) {
                 if (fed >= len) {
@@ -362,6 +362,94 @@ test_handshake_chunked(void)
         const uint8_t *ob; size_t ol;
         chc_async_pending_out(c, &ob, &ol);
         CHECK(ol > 0);          /* Hello + addendum + Ping were buffered */
+        chc_async_client_free(c);
+    }
+
+    free(stream);
+}
+
+#define EXC_TEXT                                                     \
+    "Code: 81. DB::Exception: Database `no such database` does not " \
+    "exist. (UNKNOWN_DATABASE) (version 24.8.1.1). Additional "       \
+    "diagnostic context: "                                           \
+    "0123456789012345678901234567890123456789012345678901234567890123456789" \
+    "0123456789012345678901234567890123456789012345678901234567890123456789"
+
+static uint8_t *
+build_hello_exception(size_t *out_len)
+{
+    test_mem_sink s;
+    chc_io io;
+    test_mem_sink_init(&s, &io);
+    chc_err err = {};
+    const uint8_t code[4] = { 0x51, 0x00, 0x00, 0x00 };
+    const uint8_t has_nested = 0;
+    if (chc__write_varuint(&io, CHC_PKT_EXCEPTION, &err) ||
+        chc__write_bytes(&io, code, 4, &err) ||
+        chc__write_string(&io, "DB::Exception", 13, &err) ||
+        chc__write_string(&io, EXC_TEXT, sizeof EXC_TEXT - 1, &err) ||
+        chc__write_string(&io, "0. bad::frame()", 15, &err) ||
+        chc__write_bytes(&io, &has_nested, 1, &err)) {
+        fprintf(stderr, "build_hello_exception: %s\n", err.msg);
+        test_mem_sink_free(&s);
+        return NULL;
+    }
+    *out_len = s.len;
+    return s.data;
+}
+
+static void
+test_handshake_exception(void)
+{
+    current_test = "handshake_exception";
+    chc_alloc al = test_make_alloc();
+
+    size_t len = 0;
+    uint8_t *stream = build_hello_exception(&len);
+    CHECK(stream != NULL); if (!stream) return;
+
+    static const size_t chunks[] = { 1, 2, 3, 7, 64, 1u << 20 };
+    for (size_t ci = 0; ci < sizeof chunks / sizeof *chunks; ci++)
+    /* ASan verifies library-owned exception path */
+    for (int want_exc = 0; want_exc < 2; want_exc++) {
+        chc_async_client *c = NULL;
+        chc_err e = {};
+        if (chc_async_client_init(&c, NULL, &al, &e)) {
+            fprintf(stderr, "%s: init failed: %s\n", current_test, e.msg);
+            fail_count++; continue;
+        }
+        chc_exception *exc = NULL;
+        size_t fed = 0;
+        int rc = CHC_WOULD_BLOCK;
+        for (int iter = 0; iter < 100000; iter++) {
+            rc = chc_async_handshake(c, want_exc ? &exc : NULL, &e);
+            if (rc != CHC_WOULD_BLOCK) break;
+            if (fed >= len) {
+                fprintf(stderr, "%s: chunk=%zu feed underrun\n",
+                        current_test, chunks[ci]);
+                break;
+            }
+            size_t take = (len - fed) < chunks[ci] ? (len - fed) : chunks[ci];
+            if (chc_async_submit(c, stream + fed, take, &e)) {
+                fprintf(stderr, "%s: feed: %s\n", current_test, e.msg);
+                break;
+            }
+            fed += take;
+        }
+        CHECK(rc == CHC_ERR_SERVER);
+        CHECK(e.msg[0] == '\0');
+        CHECK((exc != NULL) == (want_exc != 0));
+        if (exc) {
+            CHECK(exc->code == 81);
+            CHECK(exc->name && strcmp(exc->name, "DB::Exception") == 0);
+            CHECK(exc->display_text_len == sizeof EXC_TEXT - 1);
+            CHECK(exc->display_text_len > CHC_ERR_MSG_LEN);
+            CHECK(exc->display_text &&
+                  strcmp(exc->display_text, EXC_TEXT) == 0);
+            CHECK(exc->stack_trace &&
+                  strcmp(exc->stack_trace, "0. bad::frame()") == 0);
+            chc_exception_free(exc, &al);
+        }
         chc_async_client_free(c);
     }
 
@@ -418,6 +506,7 @@ main(void)
 {
     test_recv_golden_chunk();
     test_handshake_chunked();
+    test_handshake_exception();
     test_out_shuttle();
 
     if (fail_count) {
