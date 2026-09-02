@@ -80,11 +80,7 @@ typedef struct test_mem_sink {
 CHC_MAYBE_UNUSED static int
 test_mem_err_set(chc_err *err, int code, const char *msg)
 {
-    if (err) {
-        err->server_code = 0;
-        snprintf(err->msg, sizeof err->msg, "%s", msg);
-        err->server_name[0] = '\0';
-    }
+    if (err) snprintf(err->msg, sizeof err->msg, "%s", msg);
     return code;
 }
 

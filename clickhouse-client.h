@@ -59,11 +59,18 @@ typedef struct chc_server_info {
 } chc_server_info;
 
 typedef struct chc_client chc_client;
+typedef struct chc_exception chc_exception;
 
 /* Performs Hello / HelloAck handshake immediately. On failure caller may
- * call chc_client_close to free any partially-allocated state. */
+ * call chc_client_close to free any partially-allocated state.
+ *
+ * Handshake rejection returns CHC_ERR_SERVER and leaves err->msg empty. When
+ * exc is not NULL, caller owns *exc and frees it with chc_exception_free.
+ * Other results leave *exc unchanged. Query exceptions still arrive as
+ * packets, but handshake rejection produces no client */
 int  chc_client_init(chc_client **out, const chc_client_opts *opts,
-                     const chc_alloc *al, chc_io *io, chc_err *err);
+                     const chc_alloc *al, chc_io *io, chc_exception **exc,
+                     chc_err *err);
 
 void chc_client_close(chc_client *c);
 
@@ -126,7 +133,6 @@ typedef enum chc_packet_kind {
 
 /* CHC_PKT_EXCEPTION payload. Caller frees with chc_exception_free
  * if produced. */
-typedef struct chc_exception chc_exception;
 struct chc_exception {
     int32_t        code;
     char          *name;         /* allocated in chc_alloc */
@@ -339,7 +345,7 @@ chc__read_exception(chc_client *c, chc_exception **out, chc_err *err)
 }
 
 static int
-chc__client_recv_hello(chc_client *c, chc_err *err)
+chc__client_recv_hello(chc_client *c, chc_exception **exc, chc_err *err)
 {
     uint64_t kind;
     int rc = chc__read_varuint(&c->in, &kind, err);
@@ -348,12 +354,9 @@ chc__client_recv_hello(chc_client *c, chc_err *err)
         chc_exception *e = NULL;
         rc = chc__read_exception(c, &e, err);
         if (rc != CHC_OK) return rc;
-        chc__err_set(err, CHC_ERR_SERVER, "%s",
-                     e->display_text ? e->display_text : (e->name ? e->name : ""));
-        err->server_code = e->code;
-        chc__copy_short(err->server_name, sizeof err->server_name,
-                        e->name, e->name_len);
-        chc_exception_free(e, c->al);
+        if (exc) *exc = e;
+        else chc_exception_free(e, c->al);
+        chc_err_reset(err);
         return CHC_ERR_SERVER;
     }
     if (kind != CHC_PKT_HELLO)
@@ -387,7 +390,7 @@ chc__client_recv_hello(chc_client *c, chc_err *err)
 }
 
 static int
-chc__recv_pong(chc_client *c, chc_err *err)
+chc__recv_pong(chc_client *c, chc_exception **exc, chc_err *err)
 {
     bool ioless = c->in.io == NULL;
     if (ioless) chc__in_checkpoint(&c->in);
@@ -398,12 +401,9 @@ chc__recv_pong(chc_client *c, chc_err *err)
         chc_exception *e = NULL;
         rc = chc__read_exception(c, &e, err);  /* frees its partial on non-OK */
         if (rc != CHC_OK) goto maybe_rewind;
-        chc__err_set(err, CHC_ERR_SERVER, "%s",
-                     e->display_text ? e->display_text : (e->name ? e->name : ""));
-        err->server_code = e->code;
-        chc__copy_short(err->server_name, sizeof err->server_name,
-                        e->name, e->name_len);
-        chc_exception_free(e, c->al);
+        if (exc) *exc = e;
+        else chc_exception_free(e, c->al);
+        chc_err_reset(err);
         return CHC_ERR_SERVER;
     }
     if (kind != CHC_PKT_PONG)
@@ -417,7 +417,8 @@ maybe_rewind:
 
 int
 chc_client_init(chc_client **out, const chc_client_opts *opts,
-                const chc_alloc *al, chc_io *io, chc_err *err)
+                const chc_alloc *al, chc_io *io, chc_exception **exc,
+                chc_err *err)
 {
     chc_client_opts def_opts = {};
     if (!opts) opts = &def_opts;
@@ -439,7 +440,7 @@ chc_client_init(chc_client **out, const chc_client_opts *opts,
 
     rc = chc__client_send_hello(c, opts, err);
     if (rc != CHC_OK) goto fail;
-    rc = chc__client_recv_hello(c, err);
+    rc = chc__client_recv_hello(c, exc, err);
     if (rc != CHC_OK) goto fail;
 
     /* Server's effective revision is min(ours, server). After the
@@ -463,7 +464,7 @@ chc_client_init(chc_client **out, const chc_client_opts *opts,
      * SetPingBeforeQuery posture for the connection-establishment case. */
     rc = chc_client_send_ping(c, err);
     if (rc != CHC_OK) goto fail;
-    rc = chc__recv_pong(c, err);
+    rc = chc__recv_pong(c, exc, err);
     if (rc != CHC_OK) goto fail;
 
     *out = c;

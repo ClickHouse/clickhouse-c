@@ -93,7 +93,7 @@ open_conn_compressed(test_conn *t, chc_compression comp, chc_err *err)
         opts.compression = CHC_COMP_ZSTD;
         opts.codec = &t->codec;
     }
-    int rc = chc_client_init(&t->c, &opts, &t->al, &t->io, err);
+    int rc = chc_client_init(&t->c, &opts, &t->al, &t->io, NULL, err);
     if (rc != CHC_OK) {
         close(t->fd);
         t->fd = -1;
@@ -142,7 +142,6 @@ recv_until_eos(test_conn *t, int max_packets, test_block_cb cb, void *ud,
         bool exc = pkt.kind == CHC_PKT_EXCEPTION;
         if (exc && pkt.exception) {
             chc__err_set(err, CHC_ERR_SERVER, "%s", pkt.exception->display_text);
-            err->server_code = pkt.exception->code;
         }
         if (pkt.kind == CHC_PKT_DATA && pkt.block &&
             chc_block_n_rows(pkt.block) > 0 && cb) {
@@ -170,7 +169,6 @@ recv_insert_header(test_conn *t, int max_packets, chc_err *err)
         bool exc = pkt.kind == CHC_PKT_EXCEPTION;
         if (exc && pkt.exception) {
             chc__err_set(err, CHC_ERR_SERVER, "%s", pkt.exception->display_text);
-            err->server_code = pkt.exception->code;
         }
         chc_packet_clear(t->c, &pkt);
         if (got_data) return CHC_OK;
@@ -405,10 +403,18 @@ test_bad_database(void)
     if (t.fd < 0) goto out;
     chc_posix_io_init(&t.io_state, &t.io, t.fd, NULL, NULL);
     chc_client_opts opts = { .database = "no such database" };
-    int rc = chc_client_init(&t.c, &opts, &t.al, &t.io, &err);
+    chc_exception *exc = NULL;
+    int rc = chc_client_init(&t.c, &opts, &t.al, &t.io, &exc, &err);
     CHECK(rc == CHC_ERR_SERVER);
-    CHECK(strstr(err.msg, "Database") != NULL);
-    CHECK(strstr(err.msg, "no such database") != NULL);
+    CHECK(err.msg[0] == '\0');
+    CHECK(exc != NULL);
+    if (exc) {
+        CHECK(exc->code != 0);
+        CHECK(exc->display_text != NULL);
+        CHECK(strstr(exc->display_text, "Database") != NULL);
+        CHECK(strstr(exc->display_text, "no such database") != NULL);
+        chc_exception_free(exc, &t.al);
+    }
 out:
     close_conn(&t);
 }

@@ -47,8 +47,15 @@ int  chc_async_submit(chc_async_client *c, const void *buf, size_t len,
 void chc_async_pending_out(chc_async_client *c, const uint8_t **buf, size_t *len);
 void chc_async_consume_out(chc_async_client *c, size_t n);
 
-/* drive -- never block; CHC_WOULD_BLOCK = submit more / drain out */
-int  chc_async_handshake(chc_async_client *c, chc_err *err);
+/* Drive calls never block. CHC_WOULD_BLOCK requests more input or output
+ * draining
+ *
+ * Handshake rejection returns CHC_ERR_SERVER and leaves err->msg empty. When
+ * exc is not NULL, caller owns *exc and frees it with chc_exception_free.
+ * Other results leave *exc unchanged. Query exceptions still arrive as
+ * packets, but handshake rejection ends connection setup */
+int  chc_async_handshake(chc_async_client *c, chc_exception **exc,
+                         chc_err *err);
 int  chc_async_send_query(chc_async_client *c, const char *sql, size_t sql_len,
                           const char *query_id, size_t query_id_len, chc_err *err);
 int  chc_async_send_data(chc_async_client *c, const chc_block_builder *bb,
@@ -196,7 +203,7 @@ chc_async_consume_out(chc_async_client *c, size_t n)
 }
 
 int
-chc_async_handshake(chc_async_client *c, chc_err *err)
+chc_async_handshake(chc_async_client *c, chc_exception **exc, chc_err *err)
 {
     int rc;
     chc_client *cli = &c->cli;
@@ -222,7 +229,7 @@ chc_async_handshake(chc_async_client *c, chc_err *err)
 
         case CHC__HS_RECV_HELLO:
             chc__in_checkpoint(&cli->in);
-            rc = chc__client_recv_hello(cli, err);
+            rc = chc__client_recv_hello(cli, exc, err);
             if (rc == CHC_WOULD_BLOCK) { chc__in_rewind(&cli->in); return rc; }
             if (rc != CHC_OK) return rc;  /* server exception / protocol */
             chc_in_reset(&cli->in);
@@ -242,7 +249,7 @@ chc_async_handshake(chc_async_client *c, chc_err *err)
             continue;
 
         case CHC__HS_RECV_PONG:
-            rc = chc__recv_pong(cli, err);  /* owns checkpoint/rewind */
+            rc = chc__recv_pong(cli, exc, err);  /* owns checkpoint/rewind */
             if (rc != CHC_OK) return rc;
             chc_in_reset(&cli->in);
             c->hs_phase = CHC__HS_DONE;

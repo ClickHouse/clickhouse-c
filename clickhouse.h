@@ -102,16 +102,11 @@ enum {
 #endif
 
 typedef struct chc_err {
-    int  server_code;
     char msg[CHC_ERR_MSG_LEN];
-    char server_name[64];
 } chc_err;
 
 static inline void chc_err_reset(chc_err *e) {
-    if (!e) return;
-    e->server_code = 0;
-    e->msg[0] = '\0';
-    e->server_name[0] = '\0';
+    if (e) e->msg[0] = '\0';
 }
 
 /* -------------------------------------------------------------------------- */
