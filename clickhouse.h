@@ -68,6 +68,12 @@
 #  define CHC_REPRODUCIBLE
 #endif
 
+#if CHC__HAS_ATTR(fallthrough)
+#  define CHC_FALLTHROUGH [[fallthrough]]
+#else
+#  define CHC_FALLTHROUGH
+#endif
+
 /* ckd_mul (C23 <stdckdint.h>) backs chc__mul_size; see CHC__HAVE_CKD_MUL. */
 #if defined(__has_include)
 #  if __has_include(<stdckdint.h>)
