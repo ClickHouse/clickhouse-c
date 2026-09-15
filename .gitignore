@@ -1,1 +1,5 @@
 .vscode/
+/coverage/
+*.gcda
+*.gcno
+*.gcov

@@ -12,6 +12,7 @@
  */
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
@@ -21,8 +22,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <openssl/err.h>
@@ -78,7 +82,8 @@ fail:
 
 /* ----- server side ----- */
 
-enum { MODE_ECHO_UPCASE, MODE_CLOSE_AFTER_HANDSHAKE, MODE_DRAIN_UNTIL_CLOSE };
+enum { MODE_ECHO_UPCASE, MODE_CLOSE_AFTER_HANDSHAKE, MODE_DRAIN_UNTIL_CLOSE,
+       MODE_GARBAGE };
 
 typedef struct {
     int       listen_fd;
@@ -119,6 +124,13 @@ server_thread(void *p)
             if (SSL_write(ssl, buf, n) != n) break;
         }
     } else if (a->mode == MODE_DRAIN_UNTIL_CLOSE) {
+        char buf[256];
+        while (SSL_read(ssl, buf, sizeof buf) > 0) { /* discard */ }
+    } else if (a->mode == MODE_GARBAGE) {
+        /* Raw bytes where a TLS record belongs: the peer's record layer
+         * rejects them with a queued error. */
+        static const char junk[] = "this is not a tls record at all";
+        (void) write(fd, junk, sizeof junk - 1);
         char buf[256];
         while (SSL_read(ssl, buf, sizeof buf) > 0) { /* discard */ }
     }
@@ -318,6 +330,250 @@ out:
     fixture_down(&f);
 }
 
+static int64_t
+now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t) ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+/* Cancel hook that lets the first `g_cancel_after` polls through, so a read
+ * that retries on WANT_READ can be stopped on its second pass. */
+static int  g_cancel_after = -1;
+static int  g_cancel_calls = 0;
+static bool cancel_after_cb(void *ud)
+{
+    (void) ud;
+    return g_cancel_after >= 0 && g_cancel_calls++ >= g_cancel_after;
+}
+
+/* A non-blocking socket with nothing to read makes SSL_read report
+ * WANT_READ; the loop must retry rather than fail. */
+static void
+test_want_read_retry(EVP_PKEY *pkey, X509 *cert)
+{
+    current_test = "want_read_retry";
+    fixture f;
+    if (fixture_up(&f, pkey, cert, MODE_DRAIN_UNTIL_CLOSE) != 0) {
+        fail_count++;
+        goto out;
+    }
+
+    int fl = fcntl(f.cli_fd, F_GETFL, 0);
+    CHECK(fcntl(f.cli_fd, F_SETFL, fl | O_NONBLOCK) == 0);
+
+    chc_openssl_io state;
+    chc_io io;
+    chc_openssl_io_init(&state, &io, f.cli_ssl, cancel_after_cb, NULL);
+    g_cancel_calls = 0;
+    g_cancel_after = 1;
+
+    char rb[8];
+    size_t got = 0;
+    chc_err err = {};
+    CHECK(io.read(io.ud, rb, sizeof rb, &got, &err) == CHC_ERR_CANCELLED);
+    CHECK(g_cancel_calls >= 2);
+    g_cancel_after = -1;
+    fcntl(f.cli_fd, F_SETFL, fl);
+
+out:
+    fixture_down(&f);
+}
+
+/* Closing the socket under the SSL object turns both directions into
+ * SSL_ERROR_SYSCALL with errno set. */
+static void
+test_syscall_failure(EVP_PKEY *pkey, X509 *cert)
+{
+    current_test = "syscall_failure";
+    fixture f;
+    if (fixture_up(&f, pkey, cert, MODE_DRAIN_UNTIL_CLOSE) != 0) {
+        fail_count++;
+        goto out;
+    }
+
+    chc_openssl_io state;
+    chc_io io;
+    chc_openssl_io_init(&state, &io, f.cli_ssl, NULL, NULL);
+
+    close(f.cli_fd);
+    f.cli_fd = -1;
+
+    char rb[8];
+    size_t got = 0;
+    chc_err err = {};
+    CHECK(io.read(io.ud, rb, sizeof rb, &got, &err) == CHC_ERR_IO);
+    CHECK(strstr(err.msg, "SSL_read") != NULL);
+
+    chc_err werr = {};
+    CHECK(io.write(io.ud, "hello", 5, &werr) == CHC_ERR_IO);
+    CHECK(strstr(werr.msg, "SSL_write") != NULL);
+
+out:
+    fixture_down(&f);
+}
+
+/* Non-TLS bytes on the wire surface as a protocol error carrying the
+ * OpenSSL error-queue text. */
+static void
+test_protocol_error(EVP_PKEY *pkey, X509 *cert)
+{
+    current_test = "protocol_error";
+    fixture f;
+    if (fixture_up(&f, pkey, cert, MODE_GARBAGE) != 0) {
+        fail_count++;
+        goto out;
+    }
+
+    chc_openssl_io state;
+    chc_io io;
+    chc_openssl_io_init(&state, &io, f.cli_ssl, NULL, NULL);
+
+    char rb[64];
+    size_t got = 0;
+    chc_err err = {};
+    CHECK(io.read(io.ud, rb, sizeof rb, &got, &err) == CHC_ERR_IO);
+    CHECK(strstr(err.msg, "SSL_read") != NULL);
+    CHECK(strchr(err.msg, '(') != NULL);        /* error-queue detail */
+
+out:
+    fixture_down(&f);
+}
+
+/* chc__openssl_fail maps each SSL_get_error class to a message. The
+ * classes the transport cannot be coaxed into producing are exercised
+ * directly. */
+static void
+test_fail_messages(void)
+{
+    current_test = "fail_messages";
+    chc_err err = {};
+
+    ERR_clear_error();
+    CHECK(chc__openssl_fail(&err, 0, SSL_ERROR_ZERO_RETURN, "op") == CHC_ERR_IO);
+    CHECK(strstr(err.msg, "peer closed") != NULL);
+
+    CHECK(chc__openssl_fail(&err, 0, SSL_ERROR_SYSCALL, "op") == CHC_ERR_IO);
+    CHECK(strstr(err.msg, "EOF before close_notify") != NULL);
+
+    errno = 0;
+    CHECK(chc__openssl_fail(&err, -1, SSL_ERROR_SYSCALL, "op") == CHC_ERR_IO);
+    CHECK(strstr(err.msg, "syscall failed") != NULL);
+
+    CHECK(chc__openssl_fail(&err, -1, SSL_ERROR_WANT_X509_LOOKUP, "op") == CHC_ERR_IO);
+    CHECK(strstr(err.msg, "I/O error") != NULL);
+}
+
+/* Deadlines gate the read side through poll. */
+static void
+test_deadline_without_fd(void)
+{
+    current_test = "deadline_without_fd";
+    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    CHECK(ctx != NULL);
+    if (!ctx) return;
+    SSL *ssl = SSL_new(ctx);
+    CHECK(ssl != NULL);
+    if (ssl) {
+        SSL_set_bio(ssl, BIO_new(BIO_s_mem()), BIO_new(BIO_s_mem()));
+
+        chc_openssl_io state;
+        chc_io io;
+        chc_openssl_io_init(&state, &io, ssl, NULL, NULL);
+        chc_openssl_io_set_deadline(&state, now_us() + 1000 * 1000);
+
+        char rb[8];
+        size_t got = 0;
+        chc_err err = {};
+        CHECK(io.read(io.ud, rb, sizeof rb, &got, &err) == CHC_ERR_IO);
+        CHECK(strstr(err.msg, "SSL_get_fd") != NULL);
+        SSL_free(ssl);
+    }
+    SSL_CTX_free(ctx);
+}
+
+static volatile sig_atomic_t poll_alarm = 0;
+static void on_sigalrm(int sig) { (void) sig; poll_alarm = 1; }
+
+static void
+test_deadlines(EVP_PKEY *pkey, X509 *cert)
+{
+    current_test = "deadlines";
+    fixture f;
+    if (fixture_up(&f, pkey, cert, MODE_ECHO_UPCASE) != 0) {
+        fail_count++;
+        goto out;
+    }
+
+    chc_openssl_io state;
+    chc_io io;
+    chc_openssl_io_init(&state, &io, f.cli_ssl, NULL, NULL);
+
+    /* Data on the way: poll reports readable inside the deadline. Reading
+     * part of the record leaves the rest pending, which short-circuits the
+     * next poll. */
+    chc_err err = {};
+    CHECK(io.write(io.ud, "hello", 5, &err) == CHC_OK);
+    chc_openssl_io_set_deadline(&state, now_us() + 5 * 1000 * 1000);
+    char rb[8];
+    size_t got = 0;
+    CHECK(io.read(io.ud, rb, 2, &got, &err) == CHC_OK);
+    CHECK_EQ_U64(got, 2);
+    got = 0;
+    CHECK(io.read(io.ud, rb, sizeof rb, &got, &err) == CHC_OK);
+    CHECK_EQ_U64(got, 3);
+
+    /* Deadline already behind us. */
+    chc_openssl_io_set_deadline(&state, now_us() - 1000);
+    chc_err past = {};
+    CHECK(io.read(io.ud, rb, sizeof rb, &got, &past) == CHC_ERR_IO);
+    CHECK(strstr(past.msg, "read timeout") != NULL);
+
+    /* Nothing more arrives, so poll runs out of time. */
+    chc_openssl_io_set_deadline(&state, now_us() + 80 * 1000);
+    chc_err late = {};
+    CHECK(io.read(io.ud, rb, sizeof rb, &got, &late) == CHC_ERR_IO);
+    CHECK(strstr(late.msg, "read timeout") != NULL);
+
+    /* A signal mid-poll is retried against the same deadline. */
+    struct sigaction sa = {}, old = {};
+    sa.sa_handler = on_sigalrm;
+    sigemptyset(&sa.sa_mask);
+    CHECK(sigaction(SIGALRM, &sa, &old) == 0);
+    poll_alarm = 0;
+    /* Repeating so a descheduled process still gets poll interrupted. */
+    struct itimerval it = {};
+    it.it_value.tv_usec = it.it_interval.tv_usec = 20 * 1000;
+    CHECK(setitimer(ITIMER_REAL, &it, NULL) == 0);
+    chc_openssl_io_set_deadline(&state, now_us() + 200 * 1000);
+    chc_err eintr = {};
+    CHECK(io.read(io.ud, rb, sizeof rb, &got, &eintr) == CHC_ERR_IO);
+    CHECK(poll_alarm == 1);
+    struct itimerval off = {};
+    setitimer(ITIMER_REAL, &off, NULL);
+    sigaction(SIGALRM, &old, NULL);
+
+    /* poll failing outright is reported rather than retried. */
+    struct rlimit saved;
+    if (getrlimit(RLIMIT_NOFILE, &saved) == 0) {
+        struct rlimit none = { 0, saved.rlim_max };
+        CHECK(setrlimit(RLIMIT_NOFILE, &none) == 0);
+        chc_openssl_io_set_deadline(&state, now_us() + 1000 * 1000);
+        chc_err perr = {};
+        int rc = io.read(io.ud, rb, sizeof rb, &got, &perr);
+        CHECK(setrlimit(RLIMIT_NOFILE, &saved) == 0);
+        CHECK(rc == CHC_ERR_IO);
+        CHECK(strstr(perr.msg, "poll(") != NULL);
+    } else
+        fail_count++;
+
+    chc_openssl_io_set_deadline(&state, 0);
+
+out:
+    fixture_down(&f);
+}
+
 int
 main(void)
 {
@@ -333,6 +589,12 @@ main(void)
     test_echo_roundtrip(pkey, cert);
     test_eof_after_handshake(pkey, cert);
     test_cancel(pkey, cert);
+    test_want_read_retry(pkey, cert);
+    test_syscall_failure(pkey, cert);
+    test_protocol_error(pkey, cert);
+    test_fail_messages();
+    test_deadline_without_fd();
+    test_deadlines(pkey, cert);
 
     X509_free(cert);
     EVP_PKEY_free(pkey);

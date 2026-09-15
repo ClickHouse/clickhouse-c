@@ -156,4 +156,52 @@ test_mem_sink_free(test_mem_sink *sink)
     *sink = (test_mem_sink) {};
 }
 
+/* Allocator that fails the nth request, counting alloc & realloc. Drives
+ * OOM sweeps: run an operation once per n and assert every partial unwind
+ * returns the allocator to zero live bytes. */
+typedef struct test_fail_alloc {
+    size_t calls;
+    size_t fail_at;             /* SIZE_MAX: never fail */
+    size_t live;
+    size_t live_bytes;
+} test_fail_alloc;
+
+CHC_MAYBE_UNUSED static void *
+test_fail_alloc_alloc(void *ud, size_t n)
+{
+    test_fail_alloc *a = ud;
+    if (a->calls++ == a->fail_at) return NULL;
+    void *p = malloc(n ? n : 1);
+    if (p) { a->live++; a->live_bytes += n; }
+    return p;
+}
+
+CHC_MAYBE_UNUSED static void *
+test_fail_alloc_realloc(void *ud, void *p, size_t old_n, size_t new_n)
+{
+    test_fail_alloc *a = ud;
+    if (a->calls++ == a->fail_at) return NULL;
+    void *q = realloc(p, new_n ? new_n : 1);
+    if (!q) return NULL;
+    if (!p) a->live++;
+    a->live_bytes += new_n - old_n;
+    return q;
+}
+
+CHC_MAYBE_UNUSED static void
+test_fail_alloc_free(void *ud, void *p, size_t n)
+{
+    test_fail_alloc *a = ud;
+    if (p) { a->live--; a->live_bytes -= n; }
+    free(p);
+}
+
+CHC_MAYBE_UNUSED static chc_alloc
+test_fail_alloc_init(test_fail_alloc *a, size_t fail_at)
+{
+    *a = (test_fail_alloc) { .fail_at = fail_at };
+    return (chc_alloc) { a, test_fail_alloc_alloc,
+                         test_fail_alloc_realloc, test_fail_alloc_free };
+}
+
 #endif

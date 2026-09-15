@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -283,12 +284,122 @@ test_read_deadline(void) {
     close(p[0]); close(p[1]);
 }
 
+static int64_t
+now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t) ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+/* (5) A signal delivered while poll waits surfaces EINTR; the wait loop
+ *     must resume against the same deadline rather than report failure. */
+static volatile sig_atomic_t poll_alarm = 0;
+
+static void
+on_sigalrm_noop(int sig) { (void) sig; poll_alarm = 1; }
+
+static void
+test_poll_interrupted(void) {
+    current_test = "poll_interrupted";
+    int p[2];
+    CHECK(pipe(p) == 0);
+
+    struct sigaction sa = {}, old = {};
+    sa.sa_handler = on_sigalrm_noop;
+    sigemptyset(&sa.sa_mask);
+    CHECK(sigaction(SIGALRM, &sa, &old) == 0);
+
+    chc_posix_io state;
+    chc_io io;
+    chc_posix_io_init(&state, &io, p[0], NULL, NULL);
+    chc_posix_io_set_deadline(&state, now_us() + 200 * 1000);
+
+    poll_alarm = 0;
+    /* Repeating so a descheduled process still gets poll interrupted. */
+    struct itimerval it = {};
+    it.it_value.tv_usec = it.it_interval.tv_usec = 20 * 1000;
+    CHECK(setitimer(ITIMER_REAL, &it, NULL) == 0);
+
+    uint8_t buf[8];
+    size_t got = 99;
+    chc_err err = {};
+    CHECK_EQ_I64(io.read(io.ud, buf, sizeof buf, &got, &err), CHC_ERR_IO);
+    CHECK(poll_alarm == 1);
+    CHECK(strstr(err.msg, "timeout") != NULL);
+
+    struct itimerval off = {};
+    setitimer(ITIMER_REAL, &off, NULL);
+    sigaction(SIGALRM, &old, NULL);
+    close(p[0]); close(p[1]);
+}
+
+/* (6) poll failing for a reason other than EINTR is reported, not retried.
+ *     RLIMIT_NOFILE of zero makes poll reject nfds=1 with EINVAL. */
+static void
+test_poll_failure(void) {
+    current_test = "poll_failure";
+    int p[2];
+    CHECK(pipe(p) == 0);
+
+    chc_posix_io state;
+    chc_io io;
+    chc_posix_io_init(&state, &io, p[0], NULL, NULL);
+    chc_posix_io_set_deadline(&state, now_us() + 1000 * 1000);
+
+    struct rlimit saved;
+    CHECK(getrlimit(RLIMIT_NOFILE, &saved) == 0);
+    struct rlimit none = { 0, saved.rlim_max };
+    CHECK(setrlimit(RLIMIT_NOFILE, &none) == 0);
+
+    uint8_t buf[8];
+    size_t got = 0;
+    chc_err err = {};
+    int rc = io.read(io.ud, buf, sizeof buf, &got, &err);
+    CHECK(setrlimit(RLIMIT_NOFILE, &saved) == 0);
+
+    CHECK_EQ_I64(rc, CHC_ERR_IO);
+    CHECK(strstr(err.msg, "poll(") != NULL);
+    close(p[0]); close(p[1]);
+}
+
+/* (7) read & write syscall failures carry the errno text out as CHC_ERR_IO. */
+static void
+test_read_write_errors(void) {
+    current_test = "read_write_errors";
+    int p[2];
+    CHECK(pipe(p) == 0);
+
+    /* Reading the write end of a pipe: EBADF straight out of read(). */
+    chc_posix_io rstate;
+    chc_io rio;
+    chc_posix_io_init(&rstate, &rio, p[1], NULL, NULL);
+    uint8_t buf[8];
+    size_t got = 0;
+    chc_err err = {};
+    CHECK_EQ_I64(rio.read(rio.ud, buf, sizeof buf, &got, &err), CHC_ERR_IO);
+    CHECK(strstr(err.msg, "read(") != NULL);
+
+    /* Writing to a pipe with no reader: EPIPE. */
+    close(p[0]);
+    chc_posix_io wstate;
+    chc_io wio;
+    chc_posix_io_init(&wstate, &wio, p[1], NULL, NULL);
+    chc_err werr = {};
+    CHECK_EQ_I64(wio.write(wio.ud, "x", 1, &werr), CHC_ERR_IO);
+    CHECK(strstr(werr.msg, "write(") != NULL);
+    close(p[1]);
+}
+
 int
 main(void) {
+    signal(SIGPIPE, SIG_IGN);
     test_precancel();
     test_cancel_observed_each_refill();
     test_blocked_read_eintr();
     test_read_deadline();
+    test_poll_interrupted();
+    test_poll_failure();
+    test_read_write_errors();
 
     if (fail_count) {
         fprintf(stderr, "FAIL: %d check(s) failed\n", fail_count);
