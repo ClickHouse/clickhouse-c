@@ -74,6 +74,15 @@
 #  define CHC_FALLTHROUGH
 #endif
 
+/* unreachable() is C23 <stddef.h>, already included above. */
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
+#  define CHC_UNREACHABLE() unreachable()
+#elif defined(__GNUC__) || defined(__clang__)
+#  define CHC_UNREACHABLE() __builtin_unreachable()
+#else
+#  define CHC_UNREACHABLE() ((void) 0)
+#endif
+
 /* ckd_mul (C23 <stdckdint.h>) backs chc__mul_size; see CHC__HAVE_CKD_MUL. */
 #if defined(__has_include)
 #  if __has_include(<stdckdint.h>)
@@ -577,14 +586,10 @@ static int CHC__PRINTF_FMT(3, 4)
 chc__err_set(chc_err *e, int code, const char *fmt, ...)
 {
     if (!e) return code;
-    if (fmt) {
-        va_list ap;
-        __builtin_va_start(ap, fmt);
-        vsnprintf(e->msg, sizeof e->msg, fmt, ap);
-        __builtin_va_end(ap);
-    } else {
-        e->msg[0] = '\0';
-    }
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(e->msg, sizeof e->msg, fmt, ap);
+    va_end(ap);
     return code;
 }
 
@@ -1121,7 +1126,7 @@ chc_type_decimal_precision(const chc_type *t)
     case CHC_DECIMAL64:  return 18;
     case CHC_DECIMAL128: return 38;
     case CHC_DECIMAL256: return 76;
-    default:             return 0;
+    default: CHC_UNREACHABLE();
     }
 }
 
@@ -1389,17 +1394,55 @@ chc__type_push_enum(const chc_alloc *al, chc_type *parent,
                     const char *name, size_t name_len, int64_t value,
                     chc_err *err)
 {
+    char *nm = chc__strdup(al, name, name_len, err);
+    if (!nm) return CHC_ERR_OOM;
     size_t n = parent->enum_.n;
     void *arr = chc__realloc(al, parent->enum_.items,
                              n * sizeof *parent->enum_.items,
                              (n + 1) * sizeof *parent->enum_.items, err);
-    if (!arr) return CHC_ERR_OOM;
+    if (!arr) { al->free(al->ud, nm, name_len + 1); return CHC_ERR_OOM; }
     parent->enum_.items = arr;
-    parent->enum_.items[n].name = chc__strdup(al, name, name_len, err);
-    if (!parent->enum_.items[n].name) return CHC_ERR_OOM;
+    parent->enum_.items[n].name = nm;
     parent->enum_.items[n].name_len = name_len;
     parent->enum_.items[n].value = value;
     parent->enum_.n = n + 1;
+    return CHC_OK;
+}
+
+/* Tuple field-name scratch: parallel arrays handed to the type on success,
+ * freed exactly as far as each grew when a mid-list allocation fails. */
+typedef struct {
+    char   **names;
+    size_t  *lens;
+    size_t   n_names;
+    size_t   n_lens;
+} chc__fields;
+
+static void
+chc__fields_free(const chc_alloc *al, chc__fields *f)
+{
+    for (size_t i = 0; i < f->n_names && i < f->n_lens; i++)
+        al->free(al->ud, f->names[i], f->lens[i] + 1);
+    al->free(al->ud, f->names, f->n_names * sizeof *f->names);
+    al->free(al->ud, f->lens,  f->n_lens * sizeof *f->lens);
+    *f = (chc__fields) {};
+}
+
+static int
+chc__fields_grow(const chc_alloc *al, chc__fields *f, size_t n, chc_err *err)
+{
+    char **nn = chc__realloc(al, f->names, f->n_names * sizeof *f->names,
+                             n * sizeof *f->names, err);
+    if (!nn) return CHC_ERR_OOM;
+    f->names = nn;
+    f->names[n - 1] = NULL;
+    f->n_names = n;
+    size_t *nl = chc__realloc(al, f->lens, f->n_lens * sizeof *f->lens,
+                              n * sizeof *f->lens, err);
+    if (!nl) return CHC_ERR_OOM;
+    f->lens = nl;
+    f->lens[n - 1] = 0;
+    f->n_lens = n;
     return CHC_OK;
 }
 
@@ -1623,11 +1666,9 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
              * may carry an optional leading NAME (field label) before the
              * type. Field names are stored in a parallel array on the
              * parent. */
-            bool    is_tuple  = (t->kind == CHC_TUPLE);
-            char  **fn_buf    = NULL;
-            size_t *fn_lens   = NULL;
-            size_t  fn_cap    = 0;
-            bool    any_named = false;
+            bool        is_tuple  = (t->kind == CHC_TUPLE);
+            bool        any_named = false;
+            chc__fields fields    = {};
             for (;;) {
                 chc__tok la = chc__peek_tok(lx);
                 if (la.kind == CHC__TOK_RPAREN) break;
@@ -1661,80 +1702,45 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
 
                 chc_type *child = NULL;
                 int rc = chc__parse_type(lx, al, whole_start, whole_end, depth + 1, &child, err);
-                if (rc == CHC_OK)
+                if (rc == CHC_OK) {
                     rc = chc__type_push_child(al, t, child, err);
-                else
+                    if (rc == CHC_OK) child = NULL;     /* t owns it now */
+                } else
                     child = NULL;
+                if (rc == CHC_OK && is_tuple)
+                    rc = chc__fields_grow(al, &fields, t->n_children, err);
+                if (rc == CHC_OK && is_tuple && has_field) {
+                    size_t flen = field.len;
+                    char  *nm   = field.quote
+                        ? chc__strdup_unquote(al, field.start, field.len,
+                                              field.quote, &flen, err)
+                        : chc__strdup(al, field.start, field.len, err);
+                    if (nm) {
+                        fields.names[fields.n_names - 1] = nm;
+                        fields.lens[fields.n_names - 1]  = flen;
+                        any_named = true;
+                    } else
+                        rc = CHC_ERR_OOM;
+                }
                 if (rc != CHC_OK) {
                     if (child) chc_type_destroy(child, al);
-                    if (fn_buf) {
-                        for (size_t i = 0; i < fn_cap; i++)
-                            al->free(al->ud, fn_buf[i], fn_lens[i] + 1);
-                        al->free(al->ud, fn_buf,  fn_cap * sizeof *fn_buf);
-                        al->free(al->ud, fn_lens, fn_cap * sizeof *fn_lens);
-                    }
+                    chc__fields_free(al, &fields);
                     chc_type_destroy(t, al);
                     return rc;
-                }
-
-                if (is_tuple) {
-                    size_t new_cap = t->n_children;
-                    char **nfn = chc__realloc(al, fn_buf,
-                                              fn_cap * sizeof *fn_buf,
-                                              new_cap * sizeof *fn_buf, err);
-                    if (!nfn) { chc_type_destroy(t, al); return CHC_ERR_OOM; }
-                    size_t *nfl = chc__realloc(al, fn_lens,
-                                               fn_cap * sizeof *fn_lens,
-                                               new_cap * sizeof *fn_lens, err);
-                    if (!nfl) {
-                        al->free(al->ud, nfn, new_cap * sizeof *nfn);
-                        chc_type_destroy(t, al); return CHC_ERR_OOM;
-                    }
-                    fn_buf  = nfn;
-                    fn_lens = nfl;
-                    fn_buf[fn_cap]  = NULL;
-                    fn_lens[fn_cap] = 0;
-                    fn_cap = new_cap;
-                    if (has_field) {
-                        size_t flen = field.len;
-                        if (field.quote)
-                            fn_buf[fn_cap - 1] = chc__strdup_unquote(al, field.start,
-                                                                     field.len, field.quote,
-                                                                     &flen, err);
-                        else
-                            fn_buf[fn_cap - 1] = chc__strdup(al, field.start,
-                                                             field.len, err);
-                        if (!fn_buf[fn_cap - 1]) {
-                            for (size_t i = 0; i < fn_cap - 1; i++)
-                                al->free(al->ud, fn_buf[i], fn_lens[i] + 1);
-                            al->free(al->ud, fn_buf,  fn_cap * sizeof *fn_buf);
-                            al->free(al->ud, fn_lens, fn_cap * sizeof *fn_lens);
-                            chc_type_destroy(t, al); return CHC_ERR_OOM;
-                        }
-                        fn_lens[fn_cap - 1] = flen;
-                        any_named = true;
-                    }
                 }
 
                 chc__tok c = chc__peek_tok(lx);
                 if (c.kind == CHC__TOK_COMMA) { chc__eat_tok(lx); continue; }
                 if (c.kind == CHC__TOK_RPAREN) break;
-                if (fn_buf) {
-                    for (size_t i = 0; i < fn_cap; i++)
-                        al->free(al->ud, fn_buf[i], fn_lens[i] + 1);
-                    al->free(al->ud, fn_buf,  fn_cap * sizeof *fn_buf);
-                    al->free(al->ud, fn_lens, fn_cap * sizeof *fn_lens);
-                }
+                chc__fields_free(al, &fields);
                 chc_type_destroy(t, al);
                 return chc__err_set(err, CHC_ERR_TYPE, "expected ',' or ')'");
             }
             if (any_named) {
-                t->field_names     = fn_buf;
-                t->field_name_lens = fn_lens;
-            } else {
-                al->free(al->ud, fn_buf,  fn_cap * sizeof *fn_buf);
-                al->free(al->ud, fn_lens, fn_cap * sizeof *fn_lens);
-            }
+                t->field_names     = fields.names;
+                t->field_name_lens = fields.lens;
+            } else
+                chc__fields_free(al, &fields);
         }
 
         chc__tok rp = chc__eat_tok(lx);

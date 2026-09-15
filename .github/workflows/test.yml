@@ -46,8 +46,19 @@ jobs:
             cp /var/cache/apt/archives/*.deb "$HOME/.apt-cache/"
           fi
 
-      - name: Run tests
+      - name: Run tests with coverage
+        env:
+          CC: gcc
+          COVERAGE: 1
         run: ./test.sh
+
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage/
+          if-no-files-found: error
 
       - name: Upload server logs on failure
         if: failure()
