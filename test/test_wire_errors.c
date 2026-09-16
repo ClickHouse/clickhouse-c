@@ -159,7 +159,7 @@ test_read_bytes_bypass(void)
     wbuf b = {};
     for (size_t i = 0; i < sizeof b.d; i++) w8(&b, (uint8_t) i);
 
-    /* Cancelled before the first bypass read. */
+    /* Canceled before the first bypass read. */
     reader r;
     test_mem_src_init(&r.src, &r.io, b.d, b.n);
     r.io.check_cancel = cancel_cb;
@@ -260,6 +260,7 @@ test_col_read_rejects(void)
     expect_col_read("QBit", 1, &empty, CHC_ERR_TYPE);
     expect_col_read("LowCardinality(Int32, Int32)", 1, &empty, CHC_ERR_TYPE);
     expect_col_read("SimpleAggregateFunction", 1, &empty, CHC_ERR_TYPE);
+    expect_col_read("Nested", 1, &empty, CHC_ERR_TYPE);
     expect_col_read("Variant(Int32)", 1, &empty, CHC_ERR_TYPE);
 
     /* String row longer than the wire cap. */
@@ -267,10 +268,10 @@ test_col_read_rejects(void)
     wvar(&long_row, CHC_MAX_STRING_SIZE + 1);
     expect_col_read("String", 1, &long_row, CHC_ERR_PROTOCOL);
 
-    /* SimpleAggregateFunction decodes as its last child. */
+    /* SimpleAggregateFunction uses its storage type */
     wbuf u64row = {};
     w64(&u64row, 7);
-    expect_col_read("SimpleAggregateFunction(UInt64)", 1, &u64row, CHC_OK);
+    expect_col_read("SimpleAggregateFunction(sum, UInt64)", 1, &u64row, CHC_OK);
 }
 
 static void
@@ -422,7 +423,7 @@ fail_sink_write(void *ud, const void *buf, size_t n, chc_err *err)
 }
 
 /* A column tree whose layout contradicts its declared type must be rejected
- * rather than serialised as garbage. */
+ * rather than serialized as garbage. */
 static void
 test_write_mismatch(void)
 {
@@ -452,12 +453,14 @@ test_write_mismatch(void)
         "Map(Int32, Int32)", "Map(Int32, Int32)", "QBit", "LowCardinality(String)",
         "LowCardinality(String)", "Point", "Ring",
         "Variant(Int32)", "SimpleAggregateFunction",
+        "Nested(a Int32)", "Nested",
     };
     const chc_column *col_for[] = {
         &str, &fixed, &fixed, &fixed, &fixed,
         &fixed, &arr_of_str, &fixed, &str,
         &lc, &str, &fixed,
         &fixed, &fixed,
+        &fixed, &arr,           /* wrong layout, then Nested without fields */
     };
 
     for (size_t i = 0; i < sizeof type_of_col / sizeof *type_of_col; i++) {
@@ -553,7 +556,7 @@ test_write_failure_sweep(void)
         { "Point",                  NULL },
         { "Ring",                   NULL },
         { "QBit(BFloat16, 16)",     NULL },
-        { "SimpleAggregateFunction(String)", NULL },
+        { "SimpleAggregateFunction(anyLast, String)", NULL },
         { "Nothing",                NULL },
         { "LowCardinality(String)", NULL },
         { "LowCardinality(String)", NULL },

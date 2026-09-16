@@ -85,6 +85,15 @@ test_rejects(void)
         "Array(Int32 Int32)",           /* neither ',' nor ')' */
         "Tuple(x Int32 5)",             /* same, with field names live */
         "FixedString(3",                /* unterminated parameter list */
+        "SimpleAggregateFunction()",    /* aggregate function name missing */
+        "SimpleAggregateFunction('sum', UInt64)",   /* quoted function name */
+        "AggregateFunction(`sum`, Int64)",          /* quoted function name */
+        "AggregateFunction(sum)",                   /* no argument type */
+        "AggregateFunction(2 sum, Int64)",          /* missing comma after version */
+        "AggregateFunction(quantile(0.5, Float64",  /* unclosed parameter list */
+        "AggregateFunction(sequenceMatch('(?1), DateTime)",   /* unclosed quote */
+        "AggregateFunction(sum, NoSuchType)",       /* argument type unknown */
+        "JSON(`a.b` UInt32",                        /* unclosed parameter list */
         "Int32 Int32",                  /* trailing tokens */
         "Enum8('unterminated = 1)",     /* unterminated quote */
     };
@@ -140,9 +149,22 @@ test_accessors(void)
     CHECK_EQ_I64(value, 0);
     chc_type_enum_at(i32, 0, NULL, NULL, NULL);          /* not an enum, no outputs */
 
+    chc_type *agg  = parse_ok(&al, "SimpleAggregateFunction(sum, UInt64)");
+    chc_type *bare = parse_ok(&al, "AggregateFunction");
+    size_t fn_len = 99;
+    const char *fn = chc_type_agg_function(agg, &fn_len);
+    CHECK(fn != NULL);
+    if (fn) CHECK_STR_EQ(fn, fn_len, "sum");
+    CHECK(chc_type_agg_function(bare, &fn_len) == NULL);
+    CHECK_EQ_U64(fn_len, 0);
+    CHECK(chc_type_agg_function(i32, NULL) == NULL);
+    CHECK(chc_type_agg_function(NULL, &fn_len) == NULL);
+
     chc_type_destroy(fs, &al);
     chc_type_destroy(i32, &al);
     chc_type_destroy(en, &al);
+    chc_type_destroy(agg, &al);
+    chc_type_destroy(bare, &al);
 }
 
 static void
@@ -201,6 +223,87 @@ test_datetime_timezone(void)
     }
 }
 
+static void
+test_aggregate_function(void)
+{
+    current_test = "aggregate_function";
+    chc_alloc al = chc_alloc_stdlib();
+    static const struct {
+        const char *src;
+        chc_kind    kind;
+        size_t      n_children;
+        const char *func;
+        const char *storage;
+    } cases[] = {
+        { "SimpleAggregateFunction(sum, UInt64)",
+          CHC_SIMPLE_AGGREGATE_FUNCTION, 1, "sum", "UInt64" },
+        { "SimpleAggregateFunction(maxMap, Tuple(Array(UInt8), Array(UInt64)))",
+          CHC_SIMPLE_AGGREGATE_FUNCTION, 1, "maxMap",
+          "Tuple(Array(UInt8), Array(UInt64))" },
+        { "AggregateFunction(sum, Int64)",
+          CHC_AGGREGATE_FUNCTION, 1, "sum", "Int64" },
+        { "AggregateFunction(uniqCombined(12), String)",
+          CHC_AGGREGATE_FUNCTION, 1, "uniqCombined", "String" },
+        { "AggregateFunction(quantiles((0.5)), Float64)",   /* nested parentheses */
+          CHC_AGGREGATE_FUNCTION, 1, "quantiles", "Float64" },
+        { "AggregateFunction(sequenceMatch('(?1)(?2)'), DateTime, UInt8, UInt8)",
+          CHC_AGGREGATE_FUNCTION, 3, "sequenceMatch", "DateTime" },
+        { "AggregateFunction(2, sumMap, UInt8, UInt8)",
+          CHC_AGGREGATE_FUNCTION, 2, "sumMap", "UInt8" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
+        chc_type *t = parse_ok(&al, cases[i].src);
+        if (!t) continue;
+        CHECK_EQ_I64(chc_type_kind(t), cases[i].kind);
+        CHECK_EQ_U64(chc_type_n_children(t), cases[i].n_children);
+        size_t len = 0;
+        const char *nm = chc_type_agg_function(t, &len);
+        CHECK_STR_EQ(nm, len, cases[i].func);
+        nm = chc_type_name(chc_type_child(t, 0), &len);
+        CHECK_STR_EQ(nm, len, cases[i].storage);
+        nm = chc_type_name(t, &len);
+        CHECK_STR_EQ(nm, len, cases[i].src);
+        chc_type_destroy(t, &al);
+    }
+}
+
+static void
+test_nested_json_params(void)
+{
+    current_test = "nested_json_params";
+    chc_alloc al = chc_alloc_stdlib();
+    chc_type *n = parse_ok(&al, "Nested(a UInt32, b Array(String))");
+    if (n) {
+        CHECK_EQ_I64(chc_type_kind(n), CHC_NESTED);
+        CHECK_EQ_U64(chc_type_n_children(n), 2);
+        CHECK_EQ_I64(chc_type_kind(chc_type_child(n, 1)), CHC_ARRAY);
+        static const char *labels[] = { "a", "b" };
+        for (size_t i = 0; i < 2; i++) {
+            size_t len = 0;
+            const char *f = chc_type_tuple_field_name(n, i, &len);
+            CHECK(f != NULL);
+            if (f) CHECK_STR_EQ(f, len, labels[i]);
+        }
+        chc_type_destroy(n, &al);
+    }
+
+    static const char *jsons[] = {
+        "JSON",
+        "JSON(`a.b` UInt32, SKIP `a.e`)",
+        "JSON(max_dynamic_paths=16, SKIP REGEXP 'a(b)c', a.b UInt32)",
+    };
+    for (size_t i = 0; i < sizeof jsons / sizeof *jsons; i++) {
+        chc_type *j = parse_ok(&al, jsons[i]);
+        if (!j) continue;
+        CHECK_EQ_I64(chc_type_kind(j), CHC_JSON);
+        CHECK_EQ_U64(chc_type_n_children(j), 0);
+        size_t len = 0;
+        const char *nm = chc_type_name(j, &len);
+        CHECK_STR_EQ(nm, len, jsons[i]);
+        chc_type_destroy(j, &al);
+    }
+}
+
 /* Re-parse each type once per allocation, failing that one allocation. Every
  * unwind must report OOM & hand every byte back. */
 static void
@@ -217,7 +320,8 @@ test_oom_sweep(void)
         "DateTime64(3, 'UTC')",
         "Map(String, Array(LowCardinality(String)))",
         "QBit(Float64, 16)",
-        "AggregateFunction(Int8, String)",
+        "Nested(a Int32, b String)",
+        "AggregateFunction(sumMapFiltered([1, 2]), Array(UInt8), Array(UInt8))",
     };
     for (size_t i = 0; i < sizeof srcs / sizeof *srcs; i++) {
         for (size_t fail_at = 0; ; fail_at++) {
@@ -258,6 +362,8 @@ main(void)
     test_decimal_precision();
     test_format_unnamed();
     test_datetime_timezone();
+    test_aggregate_function();
+    test_nested_json_params();
     test_oom_sweep();
 
     if (fail_count) {

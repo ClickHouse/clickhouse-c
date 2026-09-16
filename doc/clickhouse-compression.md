@@ -74,7 +74,7 @@ void chc_zstd_codec_init(chc_codec *out);   /* fills zstd_* slots */
 ```
 
 Each helper only populates its own slots, so a caller wanting both
-codecs starts from a zero-initialised `chc_codec` & calls both inits in
+codecs starts from a zero-initialized `chc_codec` & calls both inits in
 either order:
 
 ```c

@@ -371,6 +371,63 @@ qbit_cb(const chc_block *b, void *ud)
     }
 }
 
+typedef struct {
+    bool saw;
+} saf_acc;
+
+static void
+check_type_name(const chc_type *t, const char *want)
+{
+    size_t len = 0;
+    const char *nm = chc_type_name(t, &len);
+    CHECK(nm != NULL);
+    if (nm) CHECK_STR_EQ(nm, len, want);
+}
+
+/* Include LowCardinality to check that its metadata is read before values */
+static void
+saf_cb(const chc_block *b, void *ud)
+{
+    saf_acc *a = ud;
+    a->saw = true;
+    CHECK(chc_block_n_columns(b) == 2);
+    if (chc_block_n_columns(b) < 2) return;
+
+    const chc_type *t = chc_block_column_type(b, 0);
+    CHECK(chc_type_kind(t) == CHC_SIMPLE_AGGREGATE_FUNCTION);
+    check_type_name(t, "SimpleAggregateFunction(sum, UInt64)");
+    CHECK_EQ_U64(chc_type_n_children(t), 1);
+    CHECK(chc_type_kind(chc_type_child(t, 0)) == CHC_UINT64);
+
+    const chc_column *c = chc_block_column(b, 0);
+    CHECK(chc_column_layout(c) == CHC_COL_FIXED);
+    CHECK_EQ_U64(chc_column_n_rows(c), 1);
+    size_t elem_size = 0;
+    const uint64_t *v = chc_column_fixed_data(c, &elem_size);
+    CHECK_EQ_U64(elem_size, 8);
+    if (v) CHECK_EQ_U64(v[0], 6);
+
+    t = chc_block_column_type(b, 1);
+    check_type_name(t,
+        "SimpleAggregateFunction(anyLast, LowCardinality(String))");
+    CHECK(chc_type_kind(chc_type_child(t, 0)) == CHC_LOW_CARDINALITY);
+
+    c = chc_block_column(b, 1);
+    CHECK(chc_column_layout(c) == CHC_COL_LOW_CARDINALITY);
+    const chc_column *dict = chc_column_lc_dict(c);
+    const uint8_t *keys = chc_column_lc_keys(c);
+    CHECK(dict != NULL && keys != NULL);
+    if (!dict || !keys) return;
+    CHECK(chc_column_layout(dict) == CHC_COL_STRING);
+    const uint8_t  *dd   = chc_column_string_data(dict);
+    const uint64_t *doff = chc_column_string_offsets(dict);
+    CHECK(dd != NULL && doff != NULL);
+    if (!dd || !doff) return;
+    uint8_t k = keys[0];
+    uint64_t from = k ? doff[k - 1] : 0;
+    CHECK_STR_EQ((const char *) dd + from, (size_t) (doff[k] - from), "x");
+}
+
 static void
 test_handshake(void)
 {
@@ -872,6 +929,27 @@ out:
 }
 
 static void
+test_simple_aggregate_live(void)
+{
+    current_test = "simple_aggregate_live";
+    test_conn t; chc_err err = {};
+    int rc = open_conn(&t, &err); CHECK_OK(rc, err);
+
+    const char *sql =
+        "SELECT CAST(6, 'SimpleAggregateFunction(sum, UInt64)') AS a,"
+        " CAST('x', 'SimpleAggregateFunction(anyLast, LowCardinality(String))') AS b";
+    rc = send_query(&t, sql, &err);
+    CHECK_OK(rc, err);
+
+    saf_acc acc = {};
+    rc = recv_until_eos(&t, 32, saf_cb, &acc, &err);
+    CHECK_OK(rc, err);
+    CHECK(acc.saw);
+out:
+    close_conn(&t);
+}
+
+static void
 test_cityhash_known_vector(void)
 {
     current_test = "cityhash_known_vector";
@@ -927,6 +1005,7 @@ int main(void)
     test_select_many_zstd();
     test_insert_zstd_roundtrip();
     test_qbit_live();
+    test_simple_aggregate_live();
 
     stop_server();
 

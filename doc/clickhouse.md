@@ -191,6 +191,8 @@ void             chc_type_enum_at           (const chc_type *t, size_t i,
 
 const char      *chc_type_tuple_field_name  (const chc_type *t, size_t i,
                                              size_t *out_len);
+const char      *chc_type_agg_function      (const chc_type *t,
+                                             size_t *out_len);
 
 size_t           chc_type_format            (const chc_type *t,
                                              char *buf, size_t buf_len);
@@ -198,6 +200,13 @@ size_t           chc_type_format            (const chc_type *t,
 
 `chc_type_format` is snprintf-style: pass `NULL`/0 to query length, then
 allocate & call again.
+
+`chc_type_tuple_field_name` covers `Nested` as well as `Tuple`; both label
+their children, `Nested(a UInt32, b String)` reading back `a` & `b`.
+
+A server only sends `Nested` whole under `flatten_nested=0`; the default
+flattens it into one `name.field Array(T)` column per field, which decode as
+plain Arrays.
 
 `Decimal*` precision is implicit in the kind: 9 / 18 / 38 / 76 digits for
 32/64/128/256-bit. `chc_type_decimal_scale` returns the explicit `S`.
@@ -262,7 +271,7 @@ Caller dispatches on `chc_column_layout`:
 | `CHC_COL_FIXED` | `chc_column_fixed_data(c, &elem_size)` — `n_rows * elem_size` LE bytes |
 | `CHC_COL_STRING` | `chc_column_string_data(c)`, `chc_column_string_offsets(c)` — `offsets[i]` is row i's exclusive end, host byte order; row 0 starts at 0 |
 | `CHC_COL_NULLABLE` | `chc_column_null_map(c)` (1 byte per row, 1 = NULL), `chc_column_nullable_inner(c)` |
-| `CHC_COL_ARRAY` | `chc_column_array_offsets(c)` (cumulative ends, host byte order), `chc_column_array_values(c)`; Map decodes as Array(Tuple(K,V)) |
+| `CHC_COL_ARRAY` | `chc_column_array_offsets(c)` (cumulative ends, host byte order), `chc_column_array_values(c)`; Map decodes as Array(Tuple(K,V)), Nested as Array(Tuple(fields)) |
 | `CHC_COL_TUPLE` | `chc_column_tuple_arity(c)`, `chc_column_tuple_child(c, i)` — each child has the same row count; QBit decodes as a tuple of `element_size` FixedString bit-plane columns |
 | `CHC_COL_LOW_CARDINALITY` | `chc_column_lc_key_size(c)` (1/2/4/8), `chc_column_lc_keys(c)` (host byte order), `chc_column_lc_dict(c)`; dict slot 0 is the default value; NULLs ride at slot 0 of inner Nullable |
 
@@ -314,10 +323,13 @@ bytes read past a block boundary stay buffered for the next call. A fresh
 BlockInfo accessors return zero when `has_block_info == false`.
 
 `JSON` decodes only under string serialization: set
-`output_format_native_write_json_as_string=1` on the SELECT. Modern JSON uses
-an 8-byte serialization version. Legacy `Object('json')` uses a distinct
-1-byte serialization kind and decodes only STRING kind 1; TUPLE kind 0
-returns `CHC_ERR_TYPE`. Each supported row arrives as one JSON document in a
+`output_format_native_write_json_as_string=1` on the SELECT. Hints & typed
+paths in the type name, as in ``JSON(max_dynamic_paths=16, `a.b` UInt32,
+SKIP `a.e`)``, steer the server's dynamic storage rather than that
+serialization, so the parser skips them & the type keeps no children.
+Modern JSON uses an 8-byte serialization version. Legacy `Object('json')`
+uses a distinct 1-byte serialization kind and decodes only STRING kind 1;
+TUPLE kind 0 returns `CHC_ERR_TYPE`. Each supported row arrives as one JSON document in a
 `CHC_COL_STRING` column, so string accessors apply. Prefix rides the column's
 prefix sub-stream, ahead of null map / offsets, so composite nesting preserves
 stream order.
@@ -331,6 +343,10 @@ Remaining Tier 4 types (`Variant`, `Dynamic`, `AggregateFunction`) return
 back to `CAST(... AS String)`.
 
 `SimpleAggregateFunction(f, T)` decodes as `T` — wire is just T's stream.
+Both aggregate types parse the function name, its literal parameters &
+`AggregateFunction`'s optional leading serialization version. Children are
+the argument types alone, the first being the storage type;
+`chc_type_agg_function` returns `f`.
 
 ## Decode limits
 
@@ -415,7 +431,8 @@ This is `Array(Nullable(UInt32))`. Compose Array, Tuple, Map, LowCardinality,
 and deeper combinations from same nodes. Row counts must be consistent across
 tree. For non-empty Array columns last offset equals rows in its values column
 
-Map has no node; build it as `Array(Tuple(K, V))`.
+Map has no node; build it as `Array(Tuple(K, V))`. Nested has none either;
+build it as `Array(Tuple(fields))`.
 ```c
 /* Map(String, Int32) */
 chc_column keys = chc_build_string(key_offsets, key_data, n_pairs);
