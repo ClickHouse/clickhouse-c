@@ -128,7 +128,7 @@ chc__openssl_read(void *ud, void *buf, size_t len, size_t *out_n, chc_err *err)
     int want = (len > (size_t) INT_MAX) ? INT_MAX : (int) len;
     for (;;) {
         if (s->check_cancel && s->check_cancel(s->cancel_ud))
-            return chc__err_set(err, CHC_ERR_CANCELLED, "cancelled");
+            return chc__err_set(err, CHC_ERR_CANCELLED, "canceled");
         int rc = chc__openssl_wait_readable(s->ssl, s->deadline_us, err);
         if (rc != CHC_OK) return rc;
         ERR_clear_error();
@@ -150,7 +150,7 @@ chc__openssl_write(void *ud, const void *buf, size_t len, chc_err *err)
     const unsigned char *p = buf;
     while (len) {
         if (s->check_cancel && s->check_cancel(s->cancel_ud))
-            return chc__err_set(err, CHC_ERR_CANCELLED, "cancelled");
+            return chc__err_set(err, CHC_ERR_CANCELLED, "canceled");
         ERR_clear_error();
         errno = 0;
         int chunk = (len > (size_t) INT_MAX) ? INT_MAX : (int) len;

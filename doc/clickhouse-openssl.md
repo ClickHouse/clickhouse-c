@@ -43,7 +43,7 @@ fires, the handshake must be complete.
   returns `CHC_ERR_CANCELLED`.
 
 Errors emerge as `CHC_ERR_IO` with an `op: what (detail)` message — `op`
-is `SSL_read` or `SSL_write`, `what` summarises the `SSL_get_error` code,
+is `SSL_read` or `SSL_write`, `what` summarizes the `SSL_get_error` code,
 detail is `ERR_peek_last_error`'s human-readable text when present.
 
 ## Read deadline

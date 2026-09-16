@@ -1,7 +1,7 @@
 /*
  * test_cancel.c -- coverage for the chc_io cancel hook & read deadline.
  *
- * Four behaviours pinned here:
+ * Four behaviors pinned here:
  *
  *  1. `check_cancel` set before a refill returns CHC_ERR_CANCELLED on
  *     the next read, no syscall observed.
@@ -156,15 +156,15 @@ test_cancel_observed_each_refill(void) {
 }
 
 /* (3) Cancel flipped while a posix read is blocked. Demonstrates the
- *     EINTR-retry behaviour: chc__posix_read silently retries on EINTR,
+ *     EINTR-retry behavior: chc__posix_read silently retries on EINTR,
  *     so a cancel flipped via a signal handler is observed only after
  *     the read returns for some other reason (data arrives, peer
  *     closes). A non-blocking transport or a refresh of check_cancel
  *     inside the EINTR retry would close this gap.
  *
- *     This test asserts the *current* behaviour so a future patch that
+ *     This test asserts the *current* behavior so a future patch that
  *     adds an EINTR-side cancel poll surfaces as a failure here & gets
- *     promoted to a behaviour change with a deliberate version bump.
+ *     promoted to a behavior change with a deliberate version bump.
  */
 static volatile sig_atomic_t alarm_fired = 0;
 
@@ -225,7 +225,7 @@ test_blocked_read_eintr(void) {
                     + (t1.tv_nsec - t0.tv_nsec) / 1000000;
 
     CHECK(alarm_fired == 1);
-    /* CURRENT (buggy) behaviour: alarm flipped cancel_now to true at
+    /* CURRENT (buggy) behavior: alarm flipped cancel_now to true at
      * ~50ms but the read kept retrying through EINTR. The parent
      * therefore stays blocked until the child writes at ~200ms, & only
      * then the *next* refill sees cancel & returns CANCELLED. Pin both

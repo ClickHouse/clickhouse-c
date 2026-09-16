@@ -106,7 +106,7 @@ void chc_zstd_codec_init(chc_codec *out);
 
 /* ============================================================
  * CityHash128 (frozen v1.0.3 variant, ported from city.cc).
- * Original: Copyright (c) 2011 Google, Inc. (MIT licence).
+ * Original: Copyright (c) 2011 Google, Inc. (MIT license).
  * Short-string helpers live in clickhouse.h; this block layers
  * the 128-bit driver on top.
  * ============================================================ */

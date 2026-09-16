@@ -716,12 +716,85 @@ static void test_json_string(void) {
     CHECK_EQ_U64(so[0], 2);                          /* "{}" */
     CHECK_STR_EQ((const char *) sd, (size_t) so[0], "{}");
     /* CH 25.8+ widens through JSON parser to {"a":"1"}; older LTS keeps
-     * {"a":1}. Both serialise same value, accept either. */
+     * {"a":1}. Both serialize same value, accept either. */
     const char *row1 = (const char *) sd + so[0];
     size_t row1_len = (size_t) (so[1] - so[0]);
     int row1_ok = (row1_len == 9 && memcmp(row1, "{\"a\":\"1\"}", 9) == 0) ||
                   (row1_len == 7 && memcmp(row1, "{\"a\":1}", 7) == 0);
     CHECK(row1_ok);
+    free_block(b);
+}
+
+/* Disable flattening so ClickHouse preserves Nested fields in one column */
+static void test_nested_unflattened(void) {
+    current_test = "nested_unflattened";
+    chc_block *b = read_roundtrip_block(
+        "SELECT CAST([(1, 'a'), (2, 'b')], "
+        "            'Nested(x UInt32, s LowCardinality(String))') AS n "
+        "SETTINGS flatten_nested = 0");
+    CHECK(b != NULL); if (!b) return;
+    CHECK_EQ_U64(chc_block_n_rows(b), 1);
+
+    const chc_type *t = chc_block_column_type(b, 0);
+    CHECK_EQ_I64(chc_type_kind(t), CHC_NESTED);
+    static const char *labels[] = { "x", "s" };
+    for (size_t i = 0; i < 2; i++) {
+        size_t len = 0;
+        const char *f = chc_type_tuple_field_name(t, i, &len);
+        CHECK(f != NULL);
+        if (f) CHECK_STR_EQ(f, len, labels[i]);
+    }
+
+    const chc_column *c = chc_block_column(b, 0);
+    CHECK(chc_column_layout(c) == CHC_COL_ARRAY);
+    CHECK_EQ_U64(chc_column_array_offsets(c)[0], 2);
+    const chc_column *tup = chc_column_array_values(c);
+    CHECK(chc_column_layout(tup) == CHC_COL_TUPLE);
+    CHECK_EQ_U64(chc_column_tuple_arity(tup), 2);
+    CHECK_EQ_U64(chc_column_n_rows(tup), 2);
+
+    size_t elem_size = 0;
+    const uint32_t *x = chc_column_fixed_data(chc_column_tuple_child(tup, 0),
+                                              &elem_size);
+    CHECK_EQ_U64(elem_size, 4);
+    if (x) { CHECK_EQ_U64(x[0], 1); CHECK_EQ_U64(x[1], 2); }
+
+    const chc_column *lc = chc_column_tuple_child(tup, 1);
+    CHECK(chc_column_layout(lc) == CHC_COL_LOW_CARDINALITY);
+    const chc_column *dict = chc_column_lc_dict(lc);
+    const uint8_t *keys = chc_column_lc_keys(lc);
+    const uint8_t  *dd   = chc_column_string_data(dict);
+    const uint64_t *doff = chc_column_string_offsets(dict);
+    static const char *rows[] = { "a", "b" };
+    for (size_t i = 0; i < 2; i++) {
+        uint8_t k = keys[i];
+        uint64_t from = k ? doff[k - 1] : 0;
+        CHECK_STR_EQ((const char *) dd + from, (size_t) (doff[k] - from), rows[i]);
+    }
+    free_block(b);
+}
+
+/* JSON with typed paths can still be sent as strings */
+static void test_json_typed_paths(void) {
+    current_test = "json_typed_paths";
+    chc_block *b = read_roundtrip_block(
+        "SELECT CAST('{\"a\":{\"b\":1}}', 'JSON(a.b UInt32, SKIP a.e)') AS j "
+        "SETTINGS output_format_native_write_json_as_string = 1");
+    CHECK(b != NULL); if (!b) return;
+    CHECK_EQ_U64(chc_block_n_rows(b), 1);
+
+    const chc_type *t = chc_block_column_type(b, 0);
+    CHECK_EQ_I64(chc_type_kind(t), CHC_JSON);
+    CHECK_EQ_U64(chc_type_n_children(t), 0);
+    size_t len = 0;
+    const char *nm = chc_type_name(t, &len);
+    CHECK_STR_EQ(nm, len, "JSON(`a.b` UInt32, SKIP `a.e`)");
+
+    const chc_column *c = chc_block_column(b, 0);
+    CHECK(chc_column_layout(c) == CHC_COL_STRING);
+    const uint8_t  *sd = chc_column_string_data(c);
+    const uint64_t *so = chc_column_string_offsets(c);
+    CHECK_STR_EQ((const char *) sd, (size_t) so[0], "{\"a\":{\"b\":1}}");
     free_block(b);
 }
 
@@ -894,7 +967,7 @@ static void test_type_parse_roundtrip(void) {
             fprintf(stderr, "%s: format overflow\n", types[i]);
             fail_count++;
         }
-        /* Round-trip should be identical or a normalised form */
+        /* Round-trip should be identical or a normalized form */
         if (strcmp(types[i], buf) != 0) {
             /* For Enum the input has spaces in the formatted output too, OK */
             fprintf(stderr, "%s: round-trip mismatch -> %s\n", types[i], buf);
@@ -1257,6 +1330,8 @@ int main(void) {
     test_multipolygon();
     test_multilinestring();
     test_json_string();
+    test_nested_unflattened();
+    test_json_typed_paths();
     test_json_nested();
     test_json_wrong_version();
     test_column_validate();

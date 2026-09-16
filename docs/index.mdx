@@ -462,7 +462,7 @@ The block reader decodes:
 - `String`, `FixedString(N)`
 - `UUID`, `IPv4`, `IPv6`
 - `Enum8`, `Enum16`
-- `Nullable(T)`, `Array(T)`, `Tuple(...)`, `Map(K, V)`, `Nested(...)`
+- `Nullable(T)`, `Array(T)`, `Tuple(...)`, `Map(K, V)`; `Nested(...)` as `Array(Tuple(...))`
 - `LowCardinality(T)`
 - `Interval`
 - `QBit(...)`
@@ -472,7 +472,9 @@ The block reader decodes:
 
 `JSON` and `Object('json')` decode under string serialization; set
 `output_format_native_write_json_as_string=1` on the query. Each supported row arrives as
-one JSON document in a `CHC_COL_STRING` column. Build same shape with `chc_build_string`;
+one JSON document in a `CHC_COL_STRING` column. Hints and typed paths in the type name,
+as in ``JSON(max_dynamic_paths=16, `a.b` UInt32, SKIP `a.e`)``, are skipped: they steer
+the server's dynamic storage, not the string serialization. Build same shape with `chc_build_string`;
 writer emits prefix required by parsed type.
 
 `Variant`, `Dynamic`, `AggregateFunction` aren't yet decoded and return `CHC_ERR_TYPE`;

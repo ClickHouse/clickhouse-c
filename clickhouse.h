@@ -248,10 +248,13 @@ void         chc_type_enum_at(const chc_type *t, size_t i,
                               const char **name, size_t *name_len,
                               int64_t *value);
 
-/* For Tuple types: returns the ith child's field name or NULL when the
- * tuple is anonymous (or i is out of range). NULL on non-Tuple types. */
+/* Return a Tuple or Nested field name, or NULL for unnamed fields,
+ * invalid indexes, or other types */
 const char  *chc_type_tuple_field_name(const chc_type *t, size_t i,
                                        size_t *out_len);
+
+/* Return an aggregate function name without parameters, or NULL when absent */
+const char  *chc_type_agg_function(const chc_type *t, size_t *out_len);
 
 /* Reproduce the printable type name into buf. Returns the number of bytes
  * that would have been written (snprintf-style); use to size buf on a
@@ -494,7 +497,7 @@ static inline uint64_t chc__bswap64(uint64_t v) {
 /* -------- CityHash short-string helpers ---------- */
 
 /* Frozen v1.0.3 variant of CityHash, ported from city.cc.
- * Original: Copyright (c) 2011 Google, Inc. (MIT licence).
+ * Original: Copyright (c) 2011 Google, Inc. (MIT license).
  * Short-string path lives here so chc__name_lookup can reuse it; 128-bit
  * compressed-frame checksum driver in clickhouse-compression.h builds on
  * these helpers */
@@ -873,7 +876,7 @@ chc__in_refill(chc_in *in, chc_err *err)
     if (in->eof) return chc__err_set(err, CHC_ERR_EOF, "unexpected eof");
 
     if (in->io->check_cancel && in->io->check_cancel(in->io->ud))
-        return chc__err_set(err, CHC_ERR_CANCELLED, "cancelled");
+        return chc__err_set(err, CHC_ERR_CANCELLED, "canceled");
 
     in->pos = 0;
     in->fill = 0;
@@ -925,7 +928,7 @@ chc__read_bytes(chc_in *in, void *dst, size_t n, chc_err *err)
         if (in->eof)
             return chc__err_set(err, CHC_ERR_EOF, "short read");
         if (in->io->check_cancel && in->io->check_cancel(in->io->ud))
-            return chc__err_set(err, CHC_ERR_CANCELLED, "cancelled");
+            return chc__err_set(err, CHC_ERR_CANCELLED, "canceled");
         size_t got = 0;
         int rc = in->io->read(in->io->ud, p, n, &got, err);
         if (rc != CHC_OK) {
@@ -1032,6 +1035,7 @@ struct chc_type {
         struct { int precision, scale; }               decimal;       /* Decimal(P, S) */
         struct { int scale; char *tz; size_t tz_len; } temporal;      /* DateTime / DateTime64 / Time64 */
         struct { size_t dimension; }                   qbit;          /* QBit(T, N): N; element type in children[0] */
+        struct { char *func; size_t func_len; }        agg;
         chc_interval_unit                              interval;      /* IntervalNanosecond .. IntervalYear */
         struct {
             size_t n;
@@ -1046,6 +1050,8 @@ static bool chc__kind_is_enum(chc_kind k)
 { return k == CHC_ENUM8 || k == CHC_ENUM16; }
 static bool chc__kind_has_tz(chc_kind k)
 { return k == CHC_DATETIME || k == CHC_DATETIME64 || k == CHC_TIME64; }
+static bool chc__kind_is_agg(chc_kind k)
+{ return k == CHC_AGGREGATE_FUNCTION || k == CHC_SIMPLE_AGGREGATE_FUNCTION; }
 
 void
 chc_type_destroy(chc_type *t, const chc_alloc *al)
@@ -1068,6 +1074,8 @@ chc_type_destroy(chc_type *t, const chc_alloc *al)
                  t->enum_.n * sizeof *t->enum_.items);
     } else if (chc__kind_has_tz(t->kind))
         al->free(al->ud, t->temporal.tz, t->temporal.tz_len + 1);
+    else if (chc__kind_is_agg(t->kind))
+        al->free(al->ud, t->agg.func, t->agg.func_len + 1);
     al->free(al->ud, t->name, t->name_len + 1);
     al->free(al->ud, t, sizeof *t);
 }
@@ -1108,12 +1116,21 @@ void             chc_type_enum_at(const chc_type *t, size_t i,
 const char *
 chc_type_tuple_field_name(const chc_type *t, size_t i, size_t *out_len)
 {
-    if (!t || t->kind != CHC_TUPLE || !t->field_names || i >= t->n_children) {
+    bool named = t && (t->kind == CHC_TUPLE || t->kind == CHC_NESTED);
+    if (!named || !t->field_names || i >= t->n_children) {
         if (out_len) *out_len = 0;
         return NULL;
     }
     if (out_len) *out_len = t->field_name_lens[i];
     return t->field_names[i];
+}
+
+const char *
+chc_type_agg_function(const chc_type *t, size_t *out_len)
+{
+    bool has = t && chc__kind_is_agg(t->kind);
+    if (out_len) *out_len = has ? t->agg.func_len : 0;
+    return has ? t->agg.func : NULL;
 }
 
 int
@@ -1370,6 +1387,25 @@ chc__name_lookup(const char *s, size_t n) CHC_REPRODUCIBLE
     return (r->len == n && memcmp(chc__name_blob + r->off, s, n) == 0) ? r : NULL;
 }
 
+/* Skip aggregate and JSON parameters, which can contain more than type names */
+static bool
+chc__skip_params(chc__lex *lx)
+{
+    size_t depth = 1;
+    while (lx->cur < lx->end) {
+        char c = *lx->cur++;
+        if (c == '\'' || c == '`' || c == '"') {
+            while (lx->cur < lx->end && *lx->cur != c) lx->cur++;
+            if (lx->cur == lx->end) return false;
+            lx->cur++;
+        } else if (c == '(')
+            depth++;
+        else if (c == ')' && !--depth)
+            return true;
+    }
+    return false;
+}
+
 static int chc__parse_type(chc__lex *lx, const chc_alloc *al,
                            const char *whole_start, const char *whole_end,
                            size_t depth, chc_type **out, chc_err *err);
@@ -1617,6 +1653,14 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
             t->temporal.tz = chc__strdup(al, s.start, s.len, err);
             if (!t->temporal.tz) { chc_type_destroy(t, al); return CHC_ERR_OOM; }
             t->temporal.tz_len = s.len;
+        } else if (t->kind == CHC_JSON) {
+            /* JSON options affect server storage but not JSON sent as strings */
+            if (!chc__skip_params(lx)) {
+                chc_type_destroy(t, al);
+                return chc__err_set(err, CHC_ERR_TYPE,
+                    "JSON: unterminated parameters");
+            }
+            lx->cur--;
         } else if (t->kind == CHC_OBJECT) {
             /* Object('name'), legacy JSON object syntax. Argument is schema
              * identifier (eg 'json'); clickhouse-cpp accepts any quoted
@@ -1661,12 +1705,57 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                     (int) num.len, num.start);
             }
             t->qbit.dimension = (size_t) n;
+        } else if (chc__kind_is_agg(t->kind)) {
+            /* ClickHouse may include a version before an aggregate function name */
+            if (chc__peek_tok(lx).kind == CHC__TOK_NUMBER) {
+                chc__eat_tok(lx);
+                if (chc__eat_tok(lx).kind != CHC__TOK_COMMA) {
+                    chc_type_destroy(t, al);
+                    return chc__err_set(err, CHC_ERR_TYPE,
+                        "%.*s: expected ',' after version",
+                        (int) head.len, head.start);
+                }
+            }
+            chc__tok fn = chc__eat_tok(lx);
+            if (fn.kind != CHC__TOK_NAME || fn.quote) {
+                chc_type_destroy(t, al);
+                return chc__err_set(err, CHC_ERR_TYPE,
+                    "%.*s: expected function name", (int) head.len, head.start);
+            }
+            t->agg.func = chc__strdup(al, fn.start, fn.len, err);
+            if (!t->agg.func) { chc_type_destroy(t, al); return CHC_ERR_OOM; }
+            t->agg.func_len = fn.len;
+            if (chc__peek_tok(lx).kind == CHC__TOK_LPAREN) {
+                chc__eat_tok(lx);
+                if (!chc__skip_params(lx)) {
+                    chc_type_destroy(t, al);
+                    return chc__err_set(err, CHC_ERR_TYPE,
+                        "%.*s: %.*s parameters unterminated",
+                        (int) head.len, head.start, (int) fn.len, fn.start);
+                }
+            }
+            while (chc__peek_tok(lx).kind == CHC__TOK_COMMA) {
+                chc__eat_tok(lx);
+                chc_type *arg = NULL;
+                int rc = chc__parse_type(lx, al, whole_start, whole_end,
+                                         depth + 1, &arg, err);
+                if (rc == CHC_OK) rc = chc__type_push_child(al, t, arg, err);
+                if (rc != CHC_OK) {
+                    chc_type_destroy(arg, al);
+                    chc_type_destroy(t, al);
+                    return rc;
+                }
+            }
+            if (!t->n_children) {
+                chc_type_destroy(t, al);
+                return chc__err_set(err, CHC_ERR_TYPE,
+                    "%.*s: %.*s has no argument type",
+                    (int) head.len, head.start, (int) fn.len, fn.start);
+            }
         } else {
-            /* Generic composite: comma-separated type list. Tuple children
-             * may carry an optional leading NAME (field label) before the
-             * type. Field names are stored in a parallel array on the
-             * parent. */
-            bool        is_tuple  = (t->kind == CHC_TUPLE);
+            /* Tuple and Nested fields may have names before their types */
+            bool        named     = (t->kind == CHC_TUPLE
+                                     || t->kind == CHC_NESTED);
             bool        any_named = false;
             chc__fields fields    = {};
             for (;;) {
@@ -1675,7 +1764,7 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
 
                 chc__tok field = {};
                 bool has_field = false;
-                if (is_tuple && la.kind == CHC__TOK_NAME) {
+                if (named && la.kind == CHC__TOK_NAME) {
                     chc__eat_tok(lx);
                     if (la.quote) {
                         /* `\`x\`` or `"x"` is never a type head, so it must be
@@ -1707,9 +1796,9 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
                     if (rc == CHC_OK) child = NULL;     /* t owns it now */
                 } else
                     child = NULL;
-                if (rc == CHC_OK && is_tuple)
+                if (rc == CHC_OK && named)
                     rc = chc__fields_grow(al, &fields, t->n_children, err);
-                if (rc == CHC_OK && is_tuple && has_field) {
+                if (rc == CHC_OK && named && has_field) {
                     size_t flen = field.len;
                     char  *nm   = field.quote
                         ? chc__strdup_unquote(al, field.start, field.len,
@@ -1754,7 +1843,7 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
     /* Decimal(P, S) compatibility: width selected by precision. */
     if (t->kind == CHC_DECIMAL128 && head.len == 7
         && memcmp(head.start, "Decimal", 7) == 0 && t->n_children == 0) {
-        /* unparenthesised "Decimal" without (P, S) — treat as Decimal128 */
+        /* Treat Decimal without parameters as Decimal128 */
     }
 
     t->name = chc__strdup(al, name_start, (size_t) (name_end - name_start), err);
@@ -2069,6 +2158,7 @@ chc__col_read_prefix(chc_in *in, const chc_type *t, chc_err *err)
     }
     if (t->kind == CHC_NULLABLE || t->kind == CHC_ARRAY
         || t->kind == CHC_TUPLE || t->kind == CHC_MAP
+        || t->kind == CHC_NESTED
         || t->kind == CHC_SIMPLE_AGGREGATE_FUNCTION) {
         for (size_t i = 0; i < t->n_children; i++) {
             int rc = chc__col_read_prefix(in, t->children[i], err);
@@ -2145,11 +2235,14 @@ chc__col_read(chc_in *in, const chc_type *t,
     }
 
     case CHC_ARRAY:
+    case CHC_NESTED:
     case CHC_MAP: {
         if (t->kind == CHC_ARRAY && t->n_children != 1)
             return chc__err_set(err, CHC_ERR_TYPE, "Array expects 1 child");
         if (t->kind == CHC_MAP && t->n_children != 2)
             return chc__err_set(err, CHC_ERR_TYPE, "Map expects 2 children");
+        if (t->kind == CHC_NESTED && !t->n_children)
+            return chc__err_set(err, CHC_ERR_TYPE, "Nested has no fields");
         chc_column *c = chc__calloc(al, sizeof *c, err);
         if (!c) return CHC_ERR_OOM;
         c->layout = CHC_COL_ARRAY;
@@ -2179,21 +2272,20 @@ chc__col_read(chc_in *in, const chc_type *t,
                                    &c->array.values, err);
             if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
         } else {
-            /* Map: synthesise an implicit Tuple(K, V) column. */
+            /* ClickHouse sends Map and Nested values as arrays of tuples */
             chc_column *tup = chc__calloc(al, sizeof *tup, err);
             if (!tup) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
+            c->array.values = tup;
             tup->layout = CHC_COL_TUPLE;
             tup->n_rows = (size_t) total;
-            tup->tuple.arity = 2;
-            tup->tuple.children = chc__calloc(al, 2 * sizeof *tup->tuple.children, err);
-            if (!tup->tuple.children) { chc__column_destroy(tup, al); chc__column_destroy(c, al); return CHC_ERR_OOM; }
-            int rc = chc__col_read(in, t->children[0], (size_t) total,
-                                   &tup->tuple.children[0], err);
-            if (rc != CHC_OK) { chc__column_destroy(tup, al); chc__column_destroy(c, al); return rc; }
-            rc = chc__col_read(in, t->children[1], (size_t) total,
-                               &tup->tuple.children[1], err);
-            if (rc != CHC_OK) { chc__column_destroy(tup, al); chc__column_destroy(c, al); return rc; }
-            c->array.values = tup;
+            tup->tuple.children = chc__calloc(al, t->n_children * sizeof *tup->tuple.children, err);
+            if (!tup->tuple.children) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
+            tup->tuple.arity = t->n_children;
+            for (size_t i = 0; i < t->n_children; i++) {
+                int rc = chc__col_read(in, t->children[i], (size_t) total,
+                                       &tup->tuple.children[i], err);
+                if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
+            }
         }
         *out = c;
         return CHC_OK;
@@ -2204,9 +2296,9 @@ chc__col_read(chc_in *in, const chc_type *t,
         if (!c) return CHC_ERR_OOM;
         c->layout = CHC_COL_TUPLE;
         c->n_rows = n_rows;
-        c->tuple.arity = t->n_children;
         c->tuple.children = chc__calloc(al, t->n_children * sizeof *c->tuple.children, err);
         if (!c->tuple.children) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
+        c->tuple.arity = t->n_children;
         for (size_t i = 0; i < t->n_children; i++) {
             int rc = chc__col_read(in, t->children[i], n_rows,
                                    &c->tuple.children[i], err);
@@ -2227,9 +2319,9 @@ chc__col_read(chc_in *in, const chc_type *t,
         if (!c) return CHC_ERR_OOM;
         c->layout = CHC_COL_TUPLE;
         c->n_rows = n_rows;
-        c->tuple.arity = bits;
         c->tuple.children = chc__calloc(al, bits * sizeof *c->tuple.children, err);
         if (!c->tuple.children) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
+        c->tuple.arity = bits;
         for (size_t i = 0; i < bits; i++) {
             int rc = chc__col_read_fixed(in, bytes_per_plane, n_rows,
                                          &c->tuple.children[i], err);
@@ -2355,10 +2447,10 @@ chc__col_read(chc_in *in, const chc_type *t,
     }
 
     case CHC_SIMPLE_AGGREGATE_FUNCTION:
-        /* Wire form is the inner type's stream. Last child is the data type. */
+        /* ClickHouse stores values using this function's first argument type */
         if (t->n_children < 1)
             return chc__err_set(err, CHC_ERR_TYPE, "SimpleAggregateFunction has no inner type");
-        return chc__col_read(in, t->children[t->n_children - 1], n_rows, out, err);
+        return chc__col_read(in, t->children[0], n_rows, out, err);
 
     /* Geo types: aliases for nested Array layers terminating in
      * Tuple(Float64, Float64). Per clickhouse-cpp factory.cpp 120-130. */
@@ -2677,7 +2769,7 @@ header_fail:
     return rc;
 }
 
-/* Block read from an already-initialised chc_in. Also used by
+/* Block read from an already-initialized chc_in. Also used by
  * clickhouse-client.h's recv_packet (persistent buffer). Thin non-looping
  * wrapper over chc__block_resume_in. Returns 0 with *out == NULL on clean EOF
  * at block boundary (only when opts->has_block_info is false; TCP path has no
@@ -2958,6 +3050,7 @@ chc__col_write_prefix(chc_io *io, const chc_type *t, chc_err *err)
     }
     if (t->kind == CHC_NULLABLE || t->kind == CHC_ARRAY
         || t->kind == CHC_TUPLE || t->kind == CHC_MAP
+        || t->kind == CHC_NESTED
         || t->kind == CHC_SIMPLE_AGGREGATE_FUNCTION) {
         for (size_t i = 0; i < t->n_children; i++) {
             int rc = chc__col_write_prefix(io, t->children[i], err);
@@ -3032,17 +3125,20 @@ chc__col_write(chc_io *io, const chc_column *c, const chc_type *t, chc_err *err)
             return rc;
         return chc__col_write(io, c->array.values, t->children[0], err);
 
-    case CHC_MAP: {
-        if (c->layout != CHC_COL_ARRAY || t->n_children != 2)
+    case CHC_MAP:
+    case CHC_NESTED: {
+        size_t arity = t->kind == CHC_MAP ? 2 : t->n_children;
+        if (c->layout != CHC_COL_ARRAY || !arity || t->n_children != arity)
             return chc__col_write_mismatch(err, t);
         if ((rc = chc__write_u64_le_array(io, c->array.offsets, c->n_rows, err)))
             return rc;
         const chc_column *tup = c->array.values;
-        if (!tup || tup->layout != CHC_COL_TUPLE || tup->tuple.arity != 2)
+        if (!tup || tup->layout != CHC_COL_TUPLE || tup->tuple.arity != arity)
             return chc__col_write_mismatch(err, t);
-        if ((rc = chc__col_write(io, tup->tuple.children[0], t->children[0], err)))
-            return rc;
-        return chc__col_write(io, tup->tuple.children[1], t->children[1], err);
+        for (size_t i = 0; i < arity; i++)
+            if ((rc = chc__col_write(io, tup->tuple.children[i], t->children[i], err)))
+                return rc;
+        return CHC_OK;
     }
 
     case CHC_TUPLE:
@@ -3105,7 +3201,7 @@ chc__col_write(chc_io *io, const chc_column *c, const chc_type *t, chc_err *err)
 
     case CHC_SIMPLE_AGGREGATE_FUNCTION:
         if (t->n_children < 1) return chc__col_write_mismatch(err, t);
-        return chc__col_write(io, c, t->children[t->n_children - 1], err);
+        return chc__col_write(io, c, t->children[0], err);
 
     case CHC_POINT:             return chc__col_write_geo(io, c, 0, err);
     case CHC_RING:
