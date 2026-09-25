@@ -398,9 +398,9 @@ test_block_header_rejects(void)
     b = (wbuf) {}; wvar(&b, 1); wvar(&b, CHC_MAX_NUM_ROWS + 1);
     expect_block_read(&b, &plain, CHC_ERR_PROTOCOL, false);
 
-    /* Per-column custom serialization is not supported. */
+    /* has_custom flag is 0 or 1 */
     b = (wbuf) {};
-    wvar(&b, 1); wvar(&b, 1); wstr(&b, "c"); wstr(&b, "UInt8"); w8(&b, 1);
+    wvar(&b, 1); wvar(&b, 1); wstr(&b, "c"); wstr(&b, "UInt8"); w8(&b, 2);
     expect_block_read(&b, &custom, CHC_ERR_PROTOCOL, false);
 
     b = (wbuf) {};

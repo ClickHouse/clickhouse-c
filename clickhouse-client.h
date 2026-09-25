@@ -23,9 +23,13 @@
 extern "C" {
 #endif
 
-/* Default protocol revision the client speaks. Matches clickhouse-cpp's
- * DBMS_MIN_PROTOCOL_VERSION_WITH_PARAMETERS pin. */
-#define CHC_CLIENT_DEFAULT_REVISION 54459u
+/* Protocol revisions & feature gates are documented in the Native Protocol
+ * spec: clickhouse.com/docs/reference/interfaces/specs/NativeProtocol
+ *
+ * Oldest supported server is ClickHouse 23.3. Client advertises
+ * SPARSE_SERIALIZATION (54465). */
+#define CHC_SERVER_MIN_REVISION 54462u
+#define CHC_CLIENT_REVISION     54465u
 
 typedef struct chc_client_opts {
     /* Identity. Defaults applied when fields are zero/NULL. */
@@ -33,7 +37,6 @@ typedef struct chc_client_opts {
     uint64_t client_version_major;  /* default 0 */
     uint64_t client_version_minor;  /* default 0 */
     uint64_t client_version_patch;  /* default 0 */
-    uint64_t client_revision;       /* default CHC_CLIENT_DEFAULT_REVISION */
 
     /* Hello body. */
     const char *database;           /* default "default" */
@@ -50,12 +53,12 @@ typedef struct chc_client_opts {
 
 typedef struct chc_server_info {
     char     name[64];
-    char     timezone[64];
+    char     timezone[64];          /* updated by CHC_PKT_TIMEZONE_UPDATE */
     char     display_name[128];
     uint64_t version_major;
     uint64_t version_minor;
     uint64_t version_patch;
-    uint64_t revision;              /* min(client_revision, server_revision) */
+    uint64_t revision;              /* min(CHC_CLIENT_REVISION, server revision) */
 } chc_server_info;
 
 typedef struct chc_client chc_client;
@@ -81,8 +84,9 @@ int  chc_client_send_query(chc_client *c,
                            const char *query_id, size_t query_id_len,
                            chc_err *err);
 
-/* Per-query setting. name / value are NUL-terminated. Matches
- * clickhouse-cpp's QuerySettingsField.flags low two bits. */
+/* Per-query setting. name / value are NUL-terminated. Flags layout per the
+ * Native Protocol spec (Query packet, settings entry); only the low two
+ * bits are assigned. */
 typedef struct chc_query_setting {
     const char *name;
     const char *value;
@@ -95,8 +99,7 @@ typedef struct chc_query_setting {
  * always CUSTOM. The server parses value via Field::restoreFromDump, so
  * callers must format value as a typed Field literal: e.g. `'hello'` for a
  * String, `42` for an integer, `[1,2,3]` for an array. NULL is `'\\N'`.
- * (Unlike clickhouse-cpp's higher-level Client::SetParam, which auto-quotes
- * raw strings, this library passes the value through verbatim so callers
+ * The value goes on the wire verbatim -- no auto-quoting -- so callers
  * keep full control of typed and non-string values.) */
 typedef struct chc_query_param {
     const char *name;
@@ -129,6 +132,7 @@ typedef enum chc_packet_kind {
     CHC_PKT_LOG             = 10,
     CHC_PKT_TABLE_COLUMNS   = 11,
     CHC_PKT_PROFILE_EVENTS  = 14,
+    CHC_PKT_TIMEZONE_UPDATE = 17,   /* no payload, see chc_server_info.timezone */
 } chc_packet_kind;
 
 /* CHC_PKT_EXCEPTION payload. Caller frees with chc_exception_free
@@ -149,7 +153,7 @@ typedef struct chc_packet {
     chc_packet_kind kind;
 
     /* Payload selected by kind; exactly one member is live, none for
-     * PONG / END_OF_STREAM / TABLE_COLUMNS. */
+     * PONG / END_OF_STREAM / TABLE_COLUMNS / TIMEZONE_UPDATE. */
     union {
         /* CHC_PKT_DATA / TOTALS / EXTREMES / LOG / PROFILE_EVENTS:
          * caller-owned chc_block, freed with chc_block_destroy. */
@@ -161,7 +165,9 @@ typedef struct chc_packet {
         /* CHC_PKT_PROGRESS. */
         struct {
             uint64_t rows, bytes, total_rows;
-            uint64_t written_rows, written_bytes;  /* >= rev 54420 */
+            uint64_t total_bytes;               /* 0 below rev 54463 */
+            uint64_t written_rows, written_bytes;
+            uint64_t elapsed_ns;
         } progress;
 
         /* CHC_PKT_PROFILE_INFO. */
@@ -197,25 +203,18 @@ int  chc_client_send_ping(chc_client *c, chc_err *err);
 #include <stdlib.h>
 #include <string.h>
 
-/* ----- protocol revision constants (mirror clickhouse-cpp client.cpp) ----- */
-#define CHC__REV_TEMPORARY_TABLES        50264u
-#define CHC__REV_TOTAL_ROWS_IN_PROGRESS  51554u
-#define CHC__REV_BLOCK_INFO              51903u
-#define CHC__REV_CLIENT_INFO             54032u
-#define CHC__REV_SERVER_TIMEZONE         54058u
-#define CHC__REV_QUOTA_KEY_IN_CLIENT     54060u
-#define CHC__REV_SERVER_DISPLAY_NAME     54372u
-#define CHC__REV_VERSION_PATCH           54401u
-#define CHC__REV_CLIENT_WRITE_INFO       54420u
-#define CHC__REV_SETTINGS_AS_STRINGS     54429u
-#define CHC__REV_INTERSERVER_SECRET      54441u
-#define CHC__REV_OPENTELEMETRY           54442u
-#define CHC__REV_DISTRIBUTED_DEPTH       54448u
-#define CHC__REV_INITIAL_QUERY_START     54449u
-#define CHC__REV_PARALLEL_REPLICAS       54453u
-#define CHC__REV_CUSTOM_SERIALIZATION    54454u
-#define CHC__REV_ADDENDUM                54458u
-#define CHC__REV_PARAMETERS              54459u
+/* Only gate above CHC_SERVER_MIN_REVISION, Progress omits total_bytes below
+ * it. TimezoneUpdate (54464) & sparse (54465) decode at any revision */
+#define CHC__REV_TOTAL_BYTES_IN_PROGRESS 54463u
+
+/* Mirror ClickHouse DBMS_MAX_HELLO_STRING_SIZE & DBMS_MAX_PASSWORD_COMPLEXITY_RULES */
+#define CHC__MAX_HELLO_STRING   4096u
+#define CHC__MAX_PASSWORD_RULES 256u
+
+static const chc_block_opts chc__tcp_block_opts = {
+    .has_block_info = true,
+    .has_custom_serialization = true,
+};
 
 /* Client → server packet kinds. */
 #define CHC__CLIENT_HELLO  0u
@@ -233,7 +232,6 @@ struct chc_client {
     uint64_t         client_version_major;
     uint64_t         client_version_minor;
     uint64_t         client_version_patch;
-    uint64_t         client_revision;
     chc_compression  compression;
     const chc_codec *codec;
 
@@ -309,19 +307,38 @@ chc__client_send_hello(chc_client *c, const chc_client_opts *opts, chc_err *err)
     if ((rc = chc__write_string (c->io, name, name_len, err)))   return rc;
     if ((rc = chc__write_varuint(c->io, opts->client_version_major, err))) return rc;
     if ((rc = chc__write_varuint(c->io, opts->client_version_minor, err))) return rc;
-    if ((rc = chc__write_varuint(c->io, c->client_revision, err))) return rc;
+    if ((rc = chc__write_varuint(c->io, CHC_CLIENT_REVISION, err))) return rc;
     if ((rc = chc__write_string (c->io, db, strlen(db), err))) return rc;
     if ((rc = chc__write_string (c->io, us, strlen(us), err))) return rc;
     if ((rc = chc__write_string (c->io, pw, strlen(pw), err))) return rc;
     return CHC_OK;
 }
 
-static void
-chc__copy_short(char *dst, size_t cap, const char *src, size_t len)
+/* Read Hello-bounded server string into dst, truncating to cap - 1 bytes */
+static int
+chc__read_server_string(chc_in *in, char *dst, size_t cap, chc_err *err)
 {
-    size_t n = len < cap - 1 ? len : cap - 1;
-    if (n) memcpy(dst, src, n);
+    uint64_t len;
+    int rc = chc__read_varuint(in, &len, err);
+    if (rc != CHC_OK) return rc;
+    if (len > CHC__MAX_HELLO_STRING)
+        return chc__err_set(err, CHC_ERR_PROTOCOL, "server string too long: %llu",
+                            (unsigned long long) len);
+    size_t n = len < cap ? (size_t) len : cap - 1;
+    if ((rc = chc__read_bytes(in, dst, n, err))) return rc;
     dst[n] = '\0';
+    return chc__skip_bytes(in, (size_t) len - n, err);
+}
+
+static void
+chc__client_setup(chc_client *c, const chc_client_opts *opts)
+{
+    c->client_version_major = opts->client_version_major;
+    c->client_version_minor = opts->client_version_minor;
+    c->client_version_patch = opts->client_version_patch;
+    c->server.revision = CHC_CLIENT_REVISION;
+    c->compression = opts->codec ? opts->compression : CHC_COMP_NONE;
+    c->codec       = opts->codec;
 }
 
 /* Reads chained exception. Caller frees via chc_exception_free. */
@@ -364,28 +381,35 @@ chc__client_recv_hello(chc_client *c, chc_exception **exc, chc_err *err)
                             "expected Hello, got %llu",
                             (unsigned long long) kind);
 
-    char *s; size_t slen;
-    if ((rc = chc__read_string(&c->in, &s, &slen, err))) return rc;
-    chc__copy_short(c->server.name, sizeof c->server.name, s, slen);
-    c->al->free(c->al->ud, s, slen + 1);
+    /* Commit only complete Hello, async handshake retries on WOULD_BLOCK */
+    chc_server_info s = {};
+    uint64_t n_rules, nonce;
+    char rule[1];
+    if ((rc = chc__read_server_string(&c->in, s.name, sizeof s.name, err)) ||
+        (rc = chc__read_varuint(&c->in, &s.version_major, err)) ||
+        (rc = chc__read_varuint(&c->in, &s.version_minor, err)) ||
+        (rc = chc__read_varuint(&c->in, &s.revision, err)))
+        return rc;
+    if (s.revision < CHC_SERVER_MIN_REVISION)
+        return chc__err_set(err, CHC_ERR_PROTOCOL,
+                            "server revision %llu older than %u",
+                            (unsigned long long) s.revision, CHC_SERVER_MIN_REVISION);
+    if (s.revision > CHC_CLIENT_REVISION) s.revision = CHC_CLIENT_REVISION;
 
-    if ((rc = chc__read_varuint(&c->in, &c->server.version_major, err))) return rc;
-    if ((rc = chc__read_varuint(&c->in, &c->server.version_minor, err))) return rc;
-    if ((rc = chc__read_varuint(&c->in, &c->server.revision,      err))) return rc;
-
-    if (c->server.revision >= CHC__REV_SERVER_TIMEZONE) {
-        if ((rc = chc__read_string(&c->in, &s, &slen, err))) return rc;
-        chc__copy_short(c->server.timezone, sizeof c->server.timezone, s, slen);
-        c->al->free(c->al->ud, s, slen + 1);
-    }
-    if (c->server.revision >= CHC__REV_SERVER_DISPLAY_NAME) {
-        if ((rc = chc__read_string(&c->in, &s, &slen, err))) return rc;
-        chc__copy_short(c->server.display_name, sizeof c->server.display_name, s, slen);
-        c->al->free(c->al->ud, s, slen + 1);
-    }
-    if (c->server.revision >= CHC__REV_VERSION_PATCH) {
-        if ((rc = chc__read_varuint(&c->in, &c->server.version_patch, err))) return rc;
-    }
+    if ((rc = chc__read_server_string(&c->in, s.timezone, sizeof s.timezone, err)) ||
+        (rc = chc__read_server_string(&c->in, s.display_name, sizeof s.display_name, err)) ||
+        (rc = chc__read_varuint(&c->in, &s.version_patch, err)) ||
+        (rc = chc__read_varuint(&c->in, &n_rules, err)))
+        return rc;
+    if (n_rules > CHC__MAX_PASSWORD_RULES)
+        return chc__err_set(err, CHC_ERR_PROTOCOL, "too many password rules: %llu",
+                            (unsigned long long) n_rules);
+    /* Pattern & message pairs, discarded */
+    for (uint64_t i = 0; i < 2 * n_rules; i++)
+        if ((rc = chc__read_server_string(&c->in, rule, sizeof rule, err))) return rc;
+    /* Nonce only serves interserver secret */
+    if ((rc = chc__read_u64_le(&c->in, &nonce, err))) return rc;
+    c->server = s;
     return CHC_OK;
 }
 
@@ -427,13 +451,8 @@ chc_client_init(chc_client **out, const chc_client_opts *opts,
     if (!c) return CHC_ERR_OOM;
     c->al = al;
     c->io = io;
-    c->client_version_major = opts->client_version_major;
-    c->client_version_minor = opts->client_version_minor;
-    c->client_version_patch = opts->client_version_patch;
-    c->client_revision = opts->client_revision ? opts->client_revision
-                                               : CHC_CLIENT_DEFAULT_REVISION;
-    c->compression = opts->codec ? opts->compression : CHC_COMP_NONE;
-    c->codec       = opts->codec;
+
+    chc__client_setup(c, opts);
 
     int rc = chc_in_init(&c->in, io, al, opts->read_buffer_bytes, err);
     if (rc != CHC_OK) { al->free(al->ud, c, sizeof *c); return rc; }
@@ -443,25 +462,16 @@ chc_client_init(chc_client **out, const chc_client_opts *opts,
     rc = chc__client_recv_hello(c, exc, err);
     if (rc != CHC_OK) goto fail;
 
-    /* Server's effective revision is min(ours, server). After the
-     * handshake we use this to gate optional fields on subsequent
-     * packets. */
-    if (c->server.revision > c->client_revision)
-        c->server.revision = c->client_revision;
-
     /* Addendum: send empty quota_key. */
-    if (c->server.revision >= CHC__REV_ADDENDUM) {
-        rc = chc__write_string(c->io, "", 0, err);
-        if (rc != CHC_OK) goto fail;
-    }
+    rc = chc__write_string(c->io, "", 0, err);
+    if (rc != CHC_OK) goto fail;
 
     /* Probe Ping. Server-side late-stage rejections (eg invalid
      * default_database in 24.x) only surface after the Addendum is read,
      * not in the Hello reply. Without a probe, the rejection races the
      * caller's first query: caller's writes may hit ECONNRESET before the
      * exception packet is read. The Ping forces a round-trip here so the
-     * exception is delivered at init time instead. Matches clickhouse-cpp's
-     * SetPingBeforeQuery posture for the connection-establishment case. */
+     * exception is delivered at init time instead. */
     rc = chc_client_send_ping(c, err);
     if (rc != CHC_OK) goto fail;
     rc = chc__recv_pong(c, exc, err);
@@ -508,20 +518,13 @@ chc_client_send_cancel(chc_client *c, chc_err *err)
  * both the uncompressed direct path and the compressed buffer-then-emit
  * path. */
 static int
-chc__client_write_block_body(chc_client *c, chc_io *sink,
-                             const chc_block_builder *bb, chc_err *err)
+chc__client_write_block_body(chc_io *sink, const chc_block_builder *bb,
+                             chc_err *err)
 {
     int rc;
-    chc_block_opts opts = {
-        .has_block_info = c->server.revision >= CHC__REV_BLOCK_INFO,
-        .has_custom_serialization = c->server.revision >= CHC__REV_CUSTOM_SERIALIZATION,
-    };
-    if (bb) return chc_block_write(sink, bb, &opts, err);
+    if (bb) return chc_block_write(sink, bb, &chc__tcp_block_opts, err);
 
-    if (opts.has_block_info) {
-        rc = chc__write_block_info(sink, err);
-        if (rc != CHC_OK) return rc;
-    }
+    if ((rc = chc__write_block_info(sink, err))) return rc;
     if ((rc = chc__write_varuint(sink, 0, err))) return rc;  /* n_cols */
     if ((rc = chc__write_varuint(sink, 0, err))) return rc;  /* n_rows */
     return CHC_OK;
@@ -536,12 +539,10 @@ chc__client_write_data(chc_client *c, const chc_block_builder *bb, chc_err *err)
     int rc;
     if ((rc = chc__write_varuint(c->io, CHC__CLIENT_DATA, err))) return rc;
     /* Temporary table name (always empty from us). */
-    if (c->server.revision >= CHC__REV_TEMPORARY_TABLES) {
-        if ((rc = chc__write_string(c->io, "", 0, err))) return rc;
-    }
+    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;
 
     if (c->compression == CHC_COMP_NONE) {
-        return chc__client_write_block_body(c, c->io, bb, err);
+        return chc__client_write_block_body(c->io, bb, err);
     }
 
     if (!c->codec)
@@ -551,7 +552,7 @@ chc__client_write_data(chc_client *c, const chc_block_builder *bb, chc_err *err)
     chc__mem_sink ms;
     chc_io sink_io;
     chc__mem_sink_init(&ms, &sink_io, c->al);
-    rc = chc__client_write_block_body(c, &sink_io, bb, err);
+    rc = chc__client_write_block_body(&sink_io, bb, err);
     if (rc != CHC_OK) { chc__mem_sink_free(&ms); return rc; }
     rc = chc__comp_emit_chunks(c->io, c->codec, c->compression,
                                ms.buf, ms.len, c->al, err);
@@ -576,71 +577,48 @@ chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
     if ((rc = chc__write_varuint(c->io, CHC__CLIENT_QUERY, err))) return rc;
     if ((rc = chc__write_string (c->io, opts->query_id, opts->query_id_len, err))) return rc;
 
-    /* ClientInfo. clickhouse-cpp sends a fully-populated struct; we send
-     * the minimum the server tolerates (initial fields blank, iface=TCP). */
-    if (c->server.revision >= CHC__REV_CLIENT_INFO) {
-        uint8_t query_kind = 1;       /* INITIAL_QUERY */
-        if ((rc = chc__write_bytes (c->io, &query_kind, 1, err))) return rc;
-        if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* initial_user */
-        if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* initial_query_id */
-        if ((rc = chc__write_string(c->io, "[::ffff:127.0.0.1]:0", 20, err))) return rc;
-        if (c->server.revision >= CHC__REV_INITIAL_QUERY_START) {
-            uint8_t z8[8] = {};
-            if ((rc = chc__write_bytes(c->io, z8, 8, err))) return rc;  /* int64 */
-        }
-        uint8_t iface_type = 1;       /* TCP */
-        if ((rc = chc__write_bytes (c->io, &iface_type, 1, err))) return rc;
-        if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* os_user */
-        if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* client_hostname */
-        if ((rc = chc__write_string(c->io, "clickhouse-c client", 19, err))) return rc;
-        if ((rc = chc__write_varuint(c->io, c->client_version_major, err))) return rc;
-        if ((rc = chc__write_varuint(c->io, c->client_version_minor, err))) return rc;
-        if ((rc = chc__write_varuint(c->io, c->client_revision, err))) return rc;
-
-        if (c->server.revision >= CHC__REV_QUOTA_KEY_IN_CLIENT)
-            if ((rc = chc__write_string(c->io, "", 0, err))) return rc;
-        if (c->server.revision >= CHC__REV_DISTRIBUTED_DEPTH)
-            if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
-        if (c->server.revision >= CHC__REV_VERSION_PATCH)
-            if ((rc = chc__write_varuint(c->io, c->client_version_patch, err))) return rc;
-        if (c->server.revision >= CHC__REV_OPENTELEMETRY) {
-            uint8_t no_otel = 0;
-            if ((rc = chc__write_bytes(c->io, &no_otel, 1, err))) return rc;
-        }
-        if (c->server.revision >= CHC__REV_PARALLEL_REPLICAS) {
-            if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
-            if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
-            if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
-        }
-    }
+    /* ClientInfo. Body layout per the Native Protocol spec (Query packet).
+     * We send the minimum the server tolerates (initial fields blank,
+     * iface=TCP); only client_name identifies us. */
+    uint8_t query_kind = 1;       /* INITIAL_QUERY */
+    uint8_t z8[8] = {};
+    uint8_t iface_type = 1;       /* TCP */
+    uint8_t no_otel = 0;
+    if ((rc = chc__write_bytes (c->io, &query_kind, 1, err))) return rc;
+    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* initial_user */
+    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* initial_query_id */
+    if ((rc = chc__write_string(c->io, "[::ffff:127.0.0.1]:0", 20, err))) return rc;
+    if ((rc = chc__write_bytes (c->io, z8, 8, err))) return rc;  /* initial_query_start_time */
+    if ((rc = chc__write_bytes (c->io, &iface_type, 1, err))) return rc;
+    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* os_user */
+    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* client_hostname */
+    if ((rc = chc__write_string(c->io, "clickhouse-c client", 19, err))) return rc;
+    if ((rc = chc__write_varuint(c->io, c->client_version_major, err))) return rc;
+    if ((rc = chc__write_varuint(c->io, c->client_version_minor, err))) return rc;
+    if ((rc = chc__write_varuint(c->io, CHC_CLIENT_REVISION, err))) return rc;
+    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* quota_key */
+    if ((rc = chc__write_varuint(c->io, 0, err))) return rc;     /* distributed_depth */
+    if ((rc = chc__write_varuint(c->io, c->client_version_patch, err))) return rc;
+    if ((rc = chc__write_bytes (c->io, &no_otel, 1, err))) return rc;
+    /* Parallel replicas: collaborate_with_initiator, count, number */
+    if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
+    if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
+    if ((rc = chc__write_varuint(c->io, 0, err))) return rc;
 
     /* Per-query settings: name + varuint(flags) + value, repeated, then
-     * empty-string terminator. Pre-54429 binary serialization isn't
-     * implemented; the empty-list path still works because the terminator
-     * is shape-compatible. */
-    if (c->server.revision >= CHC__REV_SETTINGS_AS_STRINGS) {
-        for (size_t i = 0; i < opts->n_settings; i++) {
-            const chc_query_setting *s = &opts->settings[i];
-            size_t nlen = s->name  ? strlen(s->name)  : 0;
-            size_t vlen = s->value ? strlen(s->value) : 0;
-            uint64_t flags = (s->important ? 1u : 0u) | (s->custom ? 2u : 0u);
-            if ((rc = chc__write_string (c->io, s->name,  nlen, err))) return rc;
-            if ((rc = chc__write_varuint(c->io, flags, err))) return rc;
-            if ((rc = chc__write_string (c->io, s->value, vlen, err))) return rc;
-        }
-        if ((rc = chc__write_string(c->io, "", 0, err))) return rc;
-    } else {
-        if (opts->n_settings)
-            return chc__err_set(err, CHC_ERR_PROTOCOL,
-                "server revision %llu < %u: query settings unsupported",
-                (unsigned long long) c->server.revision,
-                CHC__REV_SETTINGS_AS_STRINGS);
-        if ((rc = chc__write_string(c->io, "", 0, err))) return rc;
+     * empty-string terminator. */
+    for (size_t i = 0; i < opts->n_settings; i++) {
+        const chc_query_setting *s = &opts->settings[i];
+        size_t nlen = s->name  ? strlen(s->name)  : 0;
+        size_t vlen = s->value ? strlen(s->value) : 0;
+        uint64_t flags = (s->important ? 1u : 0u) | (s->custom ? 2u : 0u);
+        if ((rc = chc__write_string (c->io, s->name,  nlen, err))) return rc;
+        if ((rc = chc__write_varuint(c->io, flags, err))) return rc;
+        if ((rc = chc__write_string (c->io, s->value, vlen, err))) return rc;
     }
+    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;
 
-    if (c->server.revision >= CHC__REV_INTERSERVER_SECRET) {
-        if ((rc = chc__write_string(c->io, "", 0, err))) return rc;
-    }
+    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;  /* interserver secret */
 
     /* Stages::Complete = 2. */
     if ((rc = chc__write_varuint(c->io, 2, err))) return rc;
@@ -651,21 +629,15 @@ chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
     if ((rc = chc__write_string(c->io, sql, sql_len, err))) return rc;
 
     /* Parameters: same shape as settings; flags always CUSTOM (bit 1). */
-    if (c->server.revision >= CHC__REV_PARAMETERS) {
-        for (size_t i = 0; i < opts->n_params; i++) {
-            const chc_query_param *p = &opts->params[i];
-            size_t nlen = p->name  ? strlen(p->name)  : 0;
-            size_t vlen = p->value ? strlen(p->value) : 0;
-            if ((rc = chc__write_string (c->io, p->name,  nlen, err))) return rc;
-            if ((rc = chc__write_varuint(c->io, 2u, err))) return rc;
-            if ((rc = chc__write_string (c->io, p->value, vlen, err))) return rc;
-        }
-        if ((rc = chc__write_string(c->io, "", 0, err))) return rc;
-    } else if (opts->n_params) {
-        return chc__err_set(err, CHC_ERR_PROTOCOL,
-            "server revision %llu < %u: query parameters unsupported",
-            (unsigned long long) c->server.revision, CHC__REV_PARAMETERS);
+    for (size_t i = 0; i < opts->n_params; i++) {
+        const chc_query_param *p = &opts->params[i];
+        size_t nlen = p->name  ? strlen(p->name)  : 0;
+        size_t vlen = p->value ? strlen(p->value) : 0;
+        if ((rc = chc__write_string (c->io, p->name,  nlen, err))) return rc;
+        if ((rc = chc__write_varuint(c->io, 2u, err))) return rc;
+        if ((rc = chc__write_string (c->io, p->value, vlen, err))) return rc;
     }
+    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;
 
     /* Finalize: send an empty Data block as the query-text terminator. */
     return chc__client_write_data(c, NULL, err);
@@ -699,14 +671,10 @@ chc_packet_clear(chc_client *c, chc_packet *p)
     }
 }
 
-/* Read the leading string a block-bearing packet carries before block body.
- * DATA/TOTALS/EXTREMES gate a temp-table name on REV_TEMPORARY_TABLES (gated=1);
- * LOG/PROFILE_EVENTS always prepend a tag (gated=0). */
+/* Skip temp-table name or log tag block-bearing packets carry before block */
 static int
-chc__recv_skip_lead_string(chc_client *c, int gated, chc_err *err)
+chc__recv_skip_lead_string(chc_client *c, chc_err *err)
 {
-    if (gated && c->server.revision < CHC__REV_TEMPORARY_TABLES)
-        return CHC_OK;
     char *s; size_t slen;
     int rc = chc__read_string(&c->in, &s, &slen, err);
     if (rc != CHC_OK) return rc;
@@ -835,10 +803,7 @@ static int
 chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
 {
     bool ioless = c->in.io == NULL;
-    chc_block_opts opts = {
-        .has_block_info = c->server.revision >= CHC__REV_BLOCK_INFO,
-        .has_custom_serialization = c->server.revision >= CHC__REV_CUSTOM_SERIALIZATION,
-    };
+    const chc_block_opts *opts = &chc__tcp_block_opts;
     int rc;
     int is_log = 0;  /* LOG/PROFILE_EVENTS: never compressed */
 
@@ -860,17 +825,17 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
 
         case CHC_PKT_PROGRESS:
             out->kind = CHC_PKT_PROGRESS;
-            if ((rc = chc__read_varuint(&c->in, &out->progress.rows,  err)) ||
-                (rc = chc__read_varuint(&c->in, &out->progress.bytes, err)))
+            if ((rc = chc__read_varuint(&c->in, &out->progress.rows,       err)) ||
+                (rc = chc__read_varuint(&c->in, &out->progress.bytes,      err)) ||
+                (rc = chc__read_varuint(&c->in, &out->progress.total_rows, err)))
                 goto maybe_rewind;
-            if (c->server.revision >= CHC__REV_TOTAL_ROWS_IN_PROGRESS)
-                if ((rc = chc__read_varuint(&c->in, &out->progress.total_rows, err)))
+            if (c->server.revision >= CHC__REV_TOTAL_BYTES_IN_PROGRESS)
+                if ((rc = chc__read_varuint(&c->in, &out->progress.total_bytes, err)))
                     goto maybe_rewind;
-            if (c->server.revision >= CHC__REV_CLIENT_WRITE_INFO) {
-                if ((rc = chc__read_varuint(&c->in, &out->progress.written_rows,  err)) ||
-                    (rc = chc__read_varuint(&c->in, &out->progress.written_bytes, err)))
-                    goto maybe_rewind;
-            }
+            if ((rc = chc__read_varuint(&c->in, &out->progress.written_rows,  err)) ||
+                (rc = chc__read_varuint(&c->in, &out->progress.written_bytes, err)) ||
+                (rc = chc__read_varuint(&c->in, &out->progress.elapsed_ns,    err)))
+                goto maybe_rewind;
             goto control_done;
 
         case CHC_PKT_PONG:
@@ -903,6 +868,15 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
             goto control_done;
         }
 
+        /* Empty timezone means server default, as clickhouse-client treats it */
+        case CHC_PKT_TIMEZONE_UPDATE: {
+            out->kind = CHC_PKT_TIMEZONE_UPDATE;
+            char tz[sizeof c->server.timezone];
+            if ((rc = chc__read_server_string(&c->in, tz, sizeof tz, err))) goto maybe_rewind;
+            memcpy(c->server.timezone, tz, sizeof tz);
+            goto control_done;
+        }
+
         /* ---- block-bearing: commit kind + leading string, then resume ---- */
         case CHC_PKT_DATA:    out->kind = c->recv_kind = CHC_PKT_DATA;     break;
         case CHC_PKT_TOTALS:  out->kind = c->recv_kind = CHC_PKT_TOTALS;   break;
@@ -917,7 +891,7 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
                                 (unsigned long long) kind);
         }
 
-        rc = chc__recv_skip_lead_string(c, !is_log, err);
+        rc = chc__recv_skip_lead_string(c, err);
         if (rc != CHC_OK) goto maybe_rewind;
 
         /* Kind + leading string committed; resume owns the cursor from here.
@@ -935,7 +909,7 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
     /* LOG/PROFILE_EVENTS blocks are never compressed; route through the
      * uncompressed resume path regardless of c->compression. */
     if (c->compression == CHC_COMP_NONE || is_log) {
-        rc = chc__block_resume_in(&c->in, c->al, &opts,
+        rc = chc__block_resume_in(&c->in, c->al, opts,
                                   &c->recv_partial, &c->recv_next_col, err);
         if (rc == CHC_WOULD_BLOCK) return rc;  /* resume owns rewind; partial retained */
         c->recv_in_block = 0;
@@ -955,7 +929,7 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
      * decompressor + ioless decompressed buffer. io-backed:
      * baseline rebuild-per-call (chc__recv_block_compressed). */
     if (ioless) {
-        rc = chc__recv_block_compressed_resume(c, &opts, err);
+        rc = chc__recv_block_compressed_resume(c, opts, err);
         if (rc == CHC_WOULD_BLOCK) return rc;  /* partial block + decomp state retained */
         c->recv_in_block = 0;
         if (rc != CHC_OK) return rc;           /* resume tore down its state + recv_partial */
@@ -966,7 +940,7 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
         return CHC_OK;
     }
 
-    rc = chc__recv_block_compressed(c, &opts, &out->block, err);
+    rc = chc__recv_block_compressed(c, opts, &out->block, err);
     if (rc == CHC_WOULD_BLOCK) return rc;
     c->recv_in_block = 0;
     if (rc != CHC_OK) return rc;

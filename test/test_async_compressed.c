@@ -51,7 +51,7 @@ static const char *current_test = "";
 #include "test_golden_blocks.h"
 
 /* Fixed revision: block_info + custom_serialization + temp tables all on. */
-#define TEST_REVISION CHC_CLIENT_DEFAULT_REVISION
+#define TEST_REVISION CHC_CLIENT_REVISION
 
 /* ---------------- counting lz4 codec (retention assertion) --------------- */
 
@@ -104,7 +104,7 @@ build_response_stream(const chc_alloc *al, const chc_block_opts *opts,
 typedef struct {
     chc_packet_kind kind;
     chc_block      *block;          /* owned; for DATA kinds */
-    uint64_t        prog[5];        /* rows, bytes, total_rows, w_rows, w_bytes */
+    uint64_t        prog[7];        /* Progress fields in wire order */
 } rec_packet;
 
 static void
@@ -127,8 +127,10 @@ rec_take(rec_packet *out, const chc_packet *pkt)
         out->prog[0] = pkt->progress.rows;
         out->prog[1] = pkt->progress.bytes;
         out->prog[2] = pkt->progress.total_rows;
-        out->prog[3] = pkt->progress.written_rows;
-        out->prog[4] = pkt->progress.written_bytes;
+        out->prog[3] = pkt->progress.total_bytes;
+        out->prog[4] = pkt->progress.written_rows;
+        out->prog[5] = pkt->progress.written_bytes;
+        out->prog[6] = pkt->progress.elapsed_ns;
         break;
     default:
         break;
@@ -152,7 +154,6 @@ oracle_decode(const uint8_t *bytes, size_t len, const chc_codec *codec,
     c.io = &io;
     c.compression = CHC_COMP_LZ4;
     c.codec = codec;
-    c.client_revision = TEST_REVISION;
     c.server.revision = TEST_REVISION;
     if (chc_in_init(&c.in, &io, al, 0, err)) return -1;
 
@@ -305,7 +306,7 @@ test_recv_golden_chunk_compressed(void)
                 continue;
             }
             if (oracle[i].kind == CHC_PKT_PROGRESS) {
-                for (int k = 0; k < 5; k++)
+                for (int k = 0; k < 7; k++)
                     if (subj[i].prog[k] != oracle[i].prog[k]) {
                         fprintf(stderr, "%s: chunk=%zu pkt %zu prog[%d] %llu != %llu\n",
                                 current_test, chunks[ci], i, k,

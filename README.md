@@ -1,8 +1,10 @@
 # clickhouse-c
 
 Header-only C client for the [ClickHouse](https://clickhouse.com/) Native wire
-format. One core header, plus optional follow-up headers for TCP, compression,
-codecs, and I/O backends.
+format — the [Native Protocol](https://clickhouse.com/docs/reference/interfaces/specs/NativeProtocol)
+over TCP carrying [Native Format](https://clickhouse.com/docs/reference/interfaces/specs/NativeFormat)
+blocks. One core header, plus optional follow-up headers for TCP,
+compression, codecs, and I/O backends.
 
 Designed for embedding inside PostgreSQL extensions (`palloc` arena, `longjmp`)
 but with no PG-specific code. Including `clickhouse.h` alone gives a pure block
@@ -118,6 +120,7 @@ A stdlib `malloc`/`realloc`/`free` helper is available behind
 | [`clickhouse-openssl.h`](doc/clickhouse-openssl.md) | `chc_io` over `SSL_read`/`SSL_write` | `-lssl -lcrypto` |
 
 Each follow-up header is independent; pick what your build needs.
+`clickhouse-client.h` supports ClickHouse 23.3 and newer.
 
 Per-header reference in [doc/](doc/); inline declarations & comments in
 the headers themselves. Worked examples in [examples/](examples/).
@@ -143,6 +146,17 @@ pass their base names (without the trailing `.c`) as arguments:
 ```sh
 ./test.sh test_cancel test_block_decode
 ```
+
+`test_client_tcp` spawns `clickhouse server` from `PATH`. Set `CHC_TEST_PORT`
+to test against a running server instead, eg an older release in docker:
+
+```sh
+docker run -d -p 127.0.0.1:19233:9000 clickhouse/clickhouse-server:23.3.22.3
+CHC_TEST_PORT=19233 ./test.sh client_tcp
+```
+
+[`tools/capture.py`](tools/capture.py) proxies such a server to record replay
+fixtures like [test/ch23_3_sparse.bin](test/ch23_3_sparse.bin).
 
 ## Non-goals
 

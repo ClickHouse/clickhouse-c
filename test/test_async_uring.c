@@ -441,6 +441,16 @@ run_suite(const chc_client_opts *opts, const char *suite)
         CHECK(si != NULL);
         CHECK(strncmp(si->name, "ClickHouse", 10) == 0);
     }
+    if (opts) {
+        /* ClickHouse 26.9 defaults network compression to ZSTD */
+        static const char set[] = "SET network_compression_method='lz4'";
+        if (chc_async_send_query(L.cli, set, sizeof set - 1, "", 0, &err) != CHC_OK
+            || recv_until_eos(&L, NULL, NULL, &err) != CHC_OK) {
+            fprintf(stderr, "%s: set lz4: %s\n", suite, err.msg);
+            fail_count++;
+            goto done;
+        }
+    }
 
     test_uring_select(&L);
     test_uring_insert(&L);
@@ -469,7 +479,7 @@ main(void)
      * compressed recv path (chc__recv_block_compressed_resume) runs live. */
     run_suite(NULL, "");
 
-    chc_codec lz4;
+    chc_codec lz4 = {};
     chc_lz4_codec_init(&lz4);
     chc_client_opts comp = {};
     comp.compression = CHC_COMP_LZ4;

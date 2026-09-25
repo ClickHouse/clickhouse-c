@@ -290,8 +290,8 @@ is treated as OK.
 typedef struct chc_block chc_block;
 
 typedef struct chc_block_opts {
-    bool   has_block_info;            /* TCP server_revision >= 51903 */
-    bool   has_custom_serialization;  /* TCP server_revision >= 54454 */
+    bool   has_block_info;            /* TCP */
+    bool   has_custom_serialization;  /* TCP, decodes sparse columns */
     size_t read_buffer_bytes;         /* 0 = default 8 KiB */
 } chc_block_opts;
 
@@ -493,5 +493,6 @@ output_format_native_encode_types_in_binary_format = 0
 Set this in the Query packet's settings list (TCP) or on the
 `clickhouse local` command line. If the server emits binary type tags
 anyway, `chc_block_read` returns `CHC_ERR_TYPE` with a message naming
-the column. Sparse columns are stripped by `NativeWriter` in CH 25.x;
+the column. With `has_custom_serialization`, sparse columns decode into
+dense layouts, see [clickhouse-client.md](clickhouse-client.md#sparse-columns);
 no caller setting required.

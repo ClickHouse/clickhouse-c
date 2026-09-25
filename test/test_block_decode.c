@@ -880,8 +880,8 @@ static void test_json_wrong_version(void) {
 /*
  * chc_column_validate is opt-in. Decode known-good columns & confirm pass,
  * then tamper offsets / LC keys via cast-away-const to confirm both
- * invariants fire. Mirrors what ClickHouse itself enforces server-side
- * (SerializationArray.cpp:444, ColumnLowCardinality.cpp:255).
+ * invariants fire. Both invariants match what ClickHouse enforces on its
+ * own native deserialization path.
  */
 static void test_column_validate(void) {
     current_test = "column_validate";

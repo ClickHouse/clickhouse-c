@@ -333,10 +333,10 @@ const chc_column *chc_column_lc_dict(const chc_column *c);
 
 /* Walk a column tree & enforce cross-field invariants the server itself
  * enforces on its native deserialization path:
- *   - Array offsets non-decreasing (SerializationArray.cpp:444, throws
- *     "Arrays offsets are not monotonically increasing")
- *   - LowCardinality keys < dict size (ColumnLowCardinality.cpp:255, throws
- *     "Index for LowCardinality is out of range")
+ *   - Array offsets non-decreasing
+ *     ("Arrays offsets are not monotonically increasing")
+ *   - LowCardinality keys < dict size
+ *     ("Index for LowCardinality is out of range")
  * chc_block_read does NOT call this automatically — a peer that forges
  * offsets or LC keys can cause callers to read past inner-column bounds.
  * Consumers ingesting from untrusted senders should call this on each
@@ -352,13 +352,14 @@ CHC_NODISCARD int chc_column_validate(const chc_column *c, chc_err *err);
 typedef struct chc_block chc_block;
 
 typedef struct chc_block_opts {
-    /* TCP path (server_revision >= 51903): an 8-byte BlockInfo prefix is on
-     * the wire before num_columns. clickhouse-local does not emit it. */
+    /* TCP path: an 8-byte BlockInfo prefix is on the wire before
+     * num_columns. clickhouse-local does not emit it. */
     bool has_block_info;
 
-    /* TCP path (server_revision >= 54454): a 1-byte has_custom_serialization
-     * flag follows each column's type name. clickhouse-local does not emit
-     * it. */
+    /* TCP path: a has_custom_serialization byte follows each column's type
+     * name, with serialization kinds when set. Reader decodes sparse
+     * columns into dense layouts, writer always emits 0. clickhouse-local
+     * does not emit it. */
     bool has_custom_serialization;
 
     /* Internal read-buffer size. 0 = default (8 KiB). */
@@ -720,11 +721,7 @@ chc_alloc chc_alloc_stdlib(void) {
 #define CHC_READ_BUFFER 8192
 #endif
 
-/* Mirror ClickHouse's limits:
- * https://github.com/ClickHouse/ClickHouse/blob/ef11941cf5a/src/IO/ReadHelpers.h#L38
- * https://github.com/ClickHouse/ClickHouse/blob/ef11941cf5a/src/Core/Defines.h#L156-L158
- * https://github.com/ClickHouse/ClickHouse/blob/ef11941cf5a/src/DataTypes/DataTypeFixedString.h#L5
- * https://github.com/ClickHouse/ClickHouse/blob/ef11941cf5a/src/DataTypes/DataTypeFactory.cpp#L122-L127 */
+/* Mirrors the limits ClickHouse enforces server-side. */
 #ifndef CHC_MAX_STRING_SIZE
 #define CHC_MAX_STRING_SIZE       (1ULL << 30)
 #endif
@@ -963,6 +960,19 @@ chc__read_bytes(chc_in *in, void *dst, size_t n, chc_err *err)
 }
 
 static int
+chc__skip_bytes(chc_in *in, size_t n, chc_err *err)
+{
+    uint8_t sink[256];
+    while (n) {
+        size_t take = n < sizeof sink ? n : sizeof sink;
+        int rc = chc__read_bytes(in, sink, take, err);
+        if (rc != CHC_OK) return rc;
+        n -= take;
+    }
+    return CHC_OK;
+}
+
+static int
 chc__read_varuint(chc_in *in, uint64_t *out, chc_err *err)
 {
     uint64_t v = 0;
@@ -1149,8 +1159,9 @@ chc_type_decimal_precision(const chc_type *t)
 
 /* -------- type parser ---------- */
 
-/* Tokens & lexer mirror clickhouse-cpp/types/type_parser.cpp. The parser
- * is structurally identical (recursive on '(' / ')' / ','). */
+/* Tokens & lexer for printable ClickHouse type names. The parser is
+ * recursive on '(' / ')' / ','; single-quoted parameter strings carry no
+ * escapes. */
 typedef enum {
     CHC__TOK_EOS = 0, CHC__TOK_NAME, CHC__TOK_NUMBER, CHC__TOK_STRING,
     CHC__TOK_LPAREN, CHC__TOK_RPAREN, CHC__TOK_COMMA, CHC__TOK_EQ,
@@ -1185,8 +1196,8 @@ chc__next_tok(chc__lex *lx)
         if (c == ',') { lx->cur++; return (chc__tok){CHC__TOK_COMMA, st, 1, 0}; }
         if (c == '=') { lx->cur++; return (chc__tok){CHC__TOK_EQ, st, 1, 0}; }
         if (c == '\'') {
-            /* single-quoted string; clickhouse-cpp does not escape, so we
-             * accept anything up to the next unescaped quote. */
+            /* single-quoted string; type names carry no escapes, so accept
+             * anything up to the next quote. */
             lx->cur++;
             const char *body = lx->cur;
             while (lx->cur < lx->end && *lx->cur != '\'') lx->cur++;
@@ -1196,9 +1207,9 @@ chc__next_tok(chc__lex *lx)
             return (chc__tok){CHC__TOK_STRING, body, blen, 0};
         }
         if (c == '`' || c == '"') {
-            /* Quoted identifier, matching ClickHouse Lexer.cpp `quotedString`:
-             * doubled quote (`` `` `` or `""`) & backslash-escapes are skipped
-             * during scanning, resolved at copy time. */
+            /* Quoted identifier: doubled quote (`` `` `` or `""`) &
+             * backslash-escapes are skipped during scanning, resolved at
+             * copy time -- same rule as the ClickHouse SQL lexer. */
             char q = c;
             lx->cur++;
             const char *body = lx->cur;
@@ -1663,8 +1674,8 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
             lx->cur--;
         } else if (t->kind == CHC_OBJECT) {
             /* Object('name'), legacy JSON object syntax. Argument is schema
-             * identifier (eg 'json'); clickhouse-cpp accepts any quoted
-             * string. Discard argument & retain full source text in t->name
+             * identifier (eg 'json'); any quoted string is accepted.
+             * Discard argument & retain full source text in t->name
              * for round-trip & errors */
             chc__tok s = chc__eat_tok(lx);
             if (s.kind != CHC__TOK_STRING) {
@@ -2168,12 +2179,65 @@ chc__col_read_prefix(chc_in *in, const chc_type *t, chc_err *err)
     return CHC_OK;
 }
 
-/* Geo types are aliases for nested Array(...(Tuple(Float64,Float64))). depth
- * 0 = Point, 1 = Ring & LineString (Array(Point)), 2 = Polygon (Array(Ring)) &
- * MultiLineString (Array(LineString)), 3 = MultiPolygon (Array(Polygon)).
- * Defined ahead of chc__col_read so it can call back into here. */
-static int chc__col_read_geo(chc_in *in, int depth, size_t n_rows,
-                             chc_column **out, chc_err *err);
+/* Geo types alias nested Arrays over Point = Tuple(Float64, Float64),
+ * as in the server's type factory. Never mutated */
+static chc_type  chc__geo_f64 = { .kind = CHC_FLOAT64, .name = (char *) "Float64", .name_len = 7 };
+static chc_type *chc__geo_point_elems[] = { &chc__geo_f64, &chc__geo_f64 };
+static chc_type  chc__geo_point = {
+    .kind = CHC_TUPLE, .name = (char *) "Point", .name_len = 5,
+    .n_children = 2, .children = chc__geo_point_elems,
+};
+static chc_type *chc__geo_ring_elems[] = { &chc__geo_point };
+static chc_type  chc__geo_ring = {
+    .kind = CHC_ARRAY, .name = (char *) "Array(Point)", .name_len = 12,
+    .n_children = 1, .children = chc__geo_ring_elems,
+};
+static chc_type *chc__geo_polygon_elems[] = { &chc__geo_ring };
+static chc_type  chc__geo_polygon = {
+    .kind = CHC_ARRAY, .name = (char *) "Array(Array(Point))", .name_len = 19,
+    .n_children = 1, .children = chc__geo_polygon_elems,
+};
+static chc_type *chc__geo_multi_polygon_elems[] = { &chc__geo_polygon };
+static chc_type  chc__geo_multi_polygon = {
+    .kind = CHC_ARRAY, .name = (char *) "Array(Array(Array(Point)))", .name_len = 26,
+    .n_children = 1, .children = chc__geo_multi_polygon_elems,
+};
+
+static const chc_type *
+chc__geo_alias(const chc_type *t)
+{
+    switch (t->kind) {
+    case CHC_POINT:             return &chc__geo_point;
+    case CHC_RING:
+    case CHC_LINE_STRING:       return &chc__geo_ring;
+    case CHC_POLYGON:
+    case CHC_MULTI_LINE_STRING: return &chc__geo_polygon;
+    case CHC_MULTI_POLYGON:     return &chc__geo_multi_polygon;
+    default:                    return t;
+    }
+}
+
+/* Resolve types serialized as another type, SimpleAggregateFunction stores
+ * values using first argument type */
+static const chc_type *
+chc__serial_type(const chc_type *t)
+{
+    while (t->kind == CHC_SIMPLE_AGGREGATE_FUNCTION && t->n_children)
+        t = t->children[0];
+    return chc__geo_alias(t);
+}
+
+/* Serialization kind, DEFAULT is 0. 23.3 ISerialization::Kind & current
+ * KindStackBinarySerializationType agree on both */
+#define CHC__KIND_SPARSE 1u
+
+/* Final sparse offset group carries this flag (Native Format spec,
+ * kind_stack & sparse encoding). */
+#define CHC__SPARSE_END (UINT64_C(1) << 62)
+
+static int chc__col_read_kinds(chc_in *in, const chc_type *t, size_t n_rows,
+                               const uint8_t **kinds, chc_column **out,
+                               chc_err *err);
 
 /* Byte-swap a host-typed uint64/keys array in place on BE hosts. No-op on LE. */
 static void
@@ -2196,6 +2260,129 @@ chc__swap_keys(CHC_MAYBE_UNUSED void *p, CHC_MAYBE_UNUSED size_t n,
     case 8: { uint64_t *a = p; for (size_t i = 0; i < n; i++) a[i] = chc__bswap64(a[i]); break; }
     }
 #endif
+}
+
+/* Read t's children as Tuple column, serving Tuple, Map & Nested values.
+ * kinds NULL when dense */
+static int
+chc__col_read_tuple(chc_in *in, const chc_type *t, size_t n_rows,
+                    const uint8_t **kinds, chc_column **out, chc_err *err)
+{
+    const chc_alloc *al = in->al;
+    chc_column *c = chc__calloc(al, sizeof *c, err);
+    if (!c) return CHC_ERR_OOM;
+    c->layout = CHC_COL_TUPLE;
+    c->n_rows = n_rows;
+    if (t->n_children) {
+        c->tuple.children = chc__calloc(al, t->n_children * sizeof *c->tuple.children, err);
+        if (!c->tuple.children) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
+        c->tuple.arity = t->n_children;
+    }
+    for (size_t i = 0; i < t->n_children; i++) {
+        chc_column **slot = &c->tuple.children[i];
+        int rc = kinds ? chc__col_read_kinds(in, t->children[i], n_rows, kinds, slot, err)
+                       : chc__col_read(in, t->children[i], n_rows, slot, err);
+        if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
+    }
+    *out = c;
+    return CHC_OK;
+}
+
+/* Sparse body: varuint gap groups locating non-default rows, then those rows'
+ * values densely. Gaps become zero bytes or empty strings, matching
+ * ColumnSparse storage default even where type default differs (Enum) */
+static int
+chc__col_read_sparse(chc_in *in, const chc_type *t, size_t n_rows,
+                     chc_column **out, chc_err *err)
+{
+    const chc_alloc *al = in->al;
+    size_t es = chc_type_elem_size(t);
+    /* Bounds positions, dense values & string offsets alike */
+    size_t unit = es > sizeof(uint64_t) ? es : sizeof(uint64_t), bytes;
+    if (chc__mul_size(n_rows, unit, &bytes))
+        return chc__err_set(err, CHC_ERR_PROTOCOL, "column size overflow");
+
+    size_t *pos = NULL, n = 0, cap = 0, row = 0;
+    chc_column *c = NULL;
+    int rc;
+    for (;;) {
+        uint64_t g;
+        if ((rc = chc__read_varuint(in, &g, err))) goto fail;
+        bool end = g & CHC__SPARSE_END;
+        g &= ~CHC__SPARSE_END;
+        if (g >= CHC__SPARSE_END || g > n_rows - row) {
+            rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+                "sparse offsets overrun %zu rows", n_rows);
+            goto fail;
+        }
+        row += (size_t) g;
+        if (end) break;
+        if (row == n_rows) {
+            rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+                "sparse offsets overrun %zu rows", n_rows);
+            goto fail;
+        }
+        if (n == cap) {
+            size_t ncap = cap ? cap * 2 : 64;
+            if (ncap > n_rows) ncap = n_rows;
+            size_t *np = chc__realloc(al, pos, cap * sizeof *pos, ncap * sizeof *pos, err);
+            if (!np) { rc = CHC_ERR_OOM; goto fail; }
+            pos = np;
+            cap = ncap;
+        }
+        pos[n++] = row++;
+    }
+    if (row != n_rows) {
+        rc = chc__err_set(err, CHC_ERR_PROTOCOL,
+            "sparse offsets end at row %zu of %zu", row, n_rows);
+        goto fail;
+    }
+
+    rc = chc__col_read(in, t, n, &c, err);
+    if (rc != CHC_OK) goto fail;
+
+    if (n < n_rows && c->layout == CHC_COL_FIXED) {
+        uint8_t *dense = chc__calloc(al, n_rows * es, err);
+        if (!dense) { rc = CHC_ERR_OOM; goto fail; }
+        const uint8_t *src = c->fixed.data;
+        for (size_t k = 0; k < n; k++)
+            memcpy(dense + pos[k] * es, src + k * es, es);
+        al->free(al->ud, c->fixed.data, n * es);
+        c->fixed.data = dense;
+    } else if (n < n_rows && c->layout == CHC_COL_STRING) {
+        uint64_t *offs = chc__alloc(al, n_rows * sizeof *offs, err);
+        if (!offs) { rc = CHC_ERR_OOM; goto fail; }
+        uint64_t end = 0;
+        for (size_t r = 0, k = 0; r < n_rows; r++) {
+            if (k < n && pos[k] == r) end = c->str.offsets[k++];
+            offs[r] = end;
+        }
+        al->free(al->ud, c->str.offsets, n * sizeof *c->str.offsets);
+        c->str.offsets = offs;
+    }
+    c->n_rows = n_rows;
+    al->free(al->ud, pos, cap * sizeof *pos);
+    *out = c;
+    return CHC_OK;
+
+fail:
+    chc__column_destroy(c, al);
+    al->free(al->ud, pos, cap * sizeof *pos);
+    return rc;
+}
+
+/* Dispatch on serialization kinds read by chc__read_kinds, advancing cursor
+ * in same order: Tuple own kind, ignored as ClickHouse ignores it, then each
+ * element's */
+static int
+chc__col_read_kinds(chc_in *in, const chc_type *t, size_t n_rows,
+                    const uint8_t **kinds, chc_column **out, chc_err *err)
+{
+    t = chc__serial_type(t);
+    uint8_t kind = *(*kinds)++;
+    if (t->kind == CHC_TUPLE) return chc__col_read_tuple(in, t, n_rows, kinds, out, err);
+    if (kind == CHC__KIND_SPARSE) return chc__col_read_sparse(in, t, n_rows, out, err);
+    return chc__col_read(in, t, n_rows, out, err);
 }
 
 static int
@@ -2267,46 +2454,17 @@ chc__col_read(chc_in *in, const chc_type *t,
                     (unsigned long long) total);
             }
         }
-        if (t->kind == CHC_ARRAY) {
-            int rc = chc__col_read(in, t->children[0], (size_t) total,
-                                   &c->array.values, err);
-            if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
-        } else {
-            /* ClickHouse sends Map and Nested values as arrays of tuples */
-            chc_column *tup = chc__calloc(al, sizeof *tup, err);
-            if (!tup) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
-            c->array.values = tup;
-            tup->layout = CHC_COL_TUPLE;
-            tup->n_rows = (size_t) total;
-            tup->tuple.children = chc__calloc(al, t->n_children * sizeof *tup->tuple.children, err);
-            if (!tup->tuple.children) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
-            tup->tuple.arity = t->n_children;
-            for (size_t i = 0; i < t->n_children; i++) {
-                int rc = chc__col_read(in, t->children[i], (size_t) total,
-                                       &tup->tuple.children[i], err);
-                if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
-            }
-        }
+        /* ClickHouse sends Map and Nested values as arrays of tuples */
+        int rc = t->kind == CHC_ARRAY
+            ? chc__col_read(in, t->children[0], (size_t) total, &c->array.values, err)
+            : chc__col_read_tuple(in, t, (size_t) total, NULL, &c->array.values, err);
+        if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
         *out = c;
         return CHC_OK;
     }
 
-    case CHC_TUPLE: {
-        chc_column *c = chc__calloc(al, sizeof *c, err);
-        if (!c) return CHC_ERR_OOM;
-        c->layout = CHC_COL_TUPLE;
-        c->n_rows = n_rows;
-        c->tuple.children = chc__calloc(al, t->n_children * sizeof *c->tuple.children, err);
-        if (!c->tuple.children) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
-        c->tuple.arity = t->n_children;
-        for (size_t i = 0; i < t->n_children; i++) {
-            int rc = chc__col_read(in, t->children[i], n_rows,
-                                   &c->tuple.children[i], err);
-            if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
-        }
-        *out = c;
-        return CHC_OK;
-    }
+    case CHC_TUPLE:
+        return chc__col_read_tuple(in, t, n_rows, NULL, out, err);
 
     case CHC_QBIT: {
         /* Wire form is Tuple(FixedString(ceil(N/8)) x element_size): one
@@ -2401,9 +2559,9 @@ chc__col_read(chc_in *in, const chc_type *t,
 
         if (nullable_wrap) {
             /* Wire convention: slot 0 of the inner-typed dict is the NULL
-             * sentinel (clickhouse-cpp/columns/lowcardinality.cpp 287-295).
-             * Wrap the dict in a Nullable column so the caller's standard
-             * null-map dispatch covers the LC(Nullable) case. */
+             * sentinel (see the LowCardinality section of the Native Format
+             * spec). Wrap the dict in a Nullable column so the caller's
+             * standard null-map dispatch covers the LC(Nullable) case. */
             chc_column *wrapped = chc__calloc(al, sizeof *wrapped, err);
             if (!wrapped) { chc__column_destroy(inner_dict, al); chc__column_destroy(c, al); return CHC_ERR_OOM; }
             wrapped->layout = CHC_COL_NULLABLE;
@@ -2452,14 +2610,13 @@ chc__col_read(chc_in *in, const chc_type *t,
             return chc__err_set(err, CHC_ERR_TYPE, "SimpleAggregateFunction has no inner type");
         return chc__col_read(in, t->children[0], n_rows, out, err);
 
-    /* Geo types: aliases for nested Array layers terminating in
-     * Tuple(Float64, Float64). Per clickhouse-cpp factory.cpp 120-130. */
-    case CHC_POINT:              return chc__col_read_geo(in, 0, n_rows, out, err);
+    case CHC_POINT:
     case CHC_RING:
-    case CHC_LINE_STRING:        return chc__col_read_geo(in, 1, n_rows, out, err);
+    case CHC_LINE_STRING:
     case CHC_POLYGON:
-    case CHC_MULTI_LINE_STRING:  return chc__col_read_geo(in, 2, n_rows, out, err);
-    case CHC_MULTI_POLYGON:      return chc__col_read_geo(in, 3, n_rows, out, err);
+    case CHC_MULTI_LINE_STRING:
+    case CHC_MULTI_POLYGON:
+        return chc__col_read(in, chc__geo_alias(t), n_rows, out, err);
 
     case CHC_NOTHING:
     case CHC_VOID: {
@@ -2468,16 +2625,8 @@ chc__col_read(chc_in *in, const chc_type *t,
         c->layout = CHC_COL_NOTHING;
         c->n_rows = n_rows;
         /* Wire shape for Nothing is a sequence of UInt8 bytes per row. */
-        if (n_rows) {
-            uint8_t throwaway[256];
-            size_t left = n_rows;
-            while (left) {
-                size_t take = left < sizeof throwaway ? left : sizeof throwaway;
-                int rc = chc__read_bytes(in, throwaway, take, err);
-                if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
-                left -= take;
-            }
-        }
+        int rc = chc__skip_bytes(in, n_rows, err);
+        if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
         *out = c;
         return CHC_OK;
     }
@@ -2491,60 +2640,74 @@ chc__col_read(chc_in *in, const chc_type *t,
     }
 }
 
-static int
-chc__col_read_geo(chc_in *in, int depth, size_t n_rows,
-                  chc_column **out, chc_err *err)
+/* -------- block reader ---------- */
+
+/* Serialization kind count, Tuple emits own kind then each element's */
+static size_t
+chc__kinds_len(const chc_type *t)
 {
-    const chc_alloc *al = in->al;
-    if (depth == 0) {
-        /* Point = Tuple(Float64, Float64). */
-        chc_column *c = chc__calloc(al, sizeof *c, err);
-        if (!c) return CHC_ERR_OOM;
-        c->layout = CHC_COL_TUPLE;
-        c->n_rows = n_rows;
-        c->tuple.arity = 2;
-        c->tuple.children = chc__calloc(al, 2 * sizeof *c->tuple.children, err);
-        if (!c->tuple.children) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
-        for (int i = 0; i < 2; i++) {
-            int rc = chc__col_read_fixed(in, 8, n_rows, &c->tuple.children[i], err);
-            if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
+    t = chc__serial_type(t);
+    size_t n = 1;
+    if (t->kind == CHC_TUPLE)
+        for (size_t i = 0; i < t->n_children; i++)
+            n += chc__kinds_len(t->children[i]);
+    return n;
+}
+
+/* Validate kinds in chc__kinds_len order. Sparse applies to leaves stored
+ * as fixed width values, String or Nothing. Other kinds carry payloads not
+ * handled here */
+static int
+chc__kinds_check(const chc_type *t, const uint8_t **kinds, chc_err *err)
+{
+    t = chc__serial_type(t);
+    uint8_t kind = *(*kinds)++;
+    if (kind > CHC__KIND_SPARSE)
+        return chc__err_set(err, CHC_ERR_PROTOCOL,
+            "unsupported serialization kind %u", (unsigned) kind);
+    if (t->kind == CHC_TUPLE) {
+        for (size_t i = 0; i < t->n_children; i++) {
+            int rc = chc__kinds_check(t->children[i], kinds, err);
+            if (rc != CHC_OK) return rc;
         }
-        *out = c;
         return CHC_OK;
     }
-    /* Array(geo(depth-1)). */
-    chc_column *c = chc__calloc(al, sizeof *c, err);
-    if (!c) return CHC_ERR_OOM;
-    c->layout = CHC_COL_ARRAY;
-    c->n_rows = n_rows;
-    uint64_t total = 0;
-    if (n_rows) {
-        size_t offs_bytes;
-        if (chc__mul_size(n_rows, sizeof(uint64_t), &offs_bytes)) {
-            chc__column_destroy(c, al);
-            return chc__err_set(err, CHC_ERR_PROTOCOL, "array offsets size overflow");
-        }
-        c->array.offsets = chc__alloc(al, offs_bytes, err);
-        if (!c->array.offsets) { chc__column_destroy(c, al); return CHC_ERR_OOM; }
-        int rc = chc__read_bytes(in, c->array.offsets, offs_bytes, err);
-        if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
-        chc__swap_offsets(c->array.offsets, n_rows);
-        total = c->array.offsets[n_rows - 1];
-        if (total > CHC_MAX_NUM_ROWS) {
-            chc__column_destroy(c, al);
-            return chc__err_set(err, CHC_ERR_PROTOCOL,
-                "array nested length too large: %llu",
-                (unsigned long long) total);
-        }
+    if (kind == CHC__KIND_SPARSE && !chc_type_elem_size(t) && t->kind != CHC_STRING
+        && t->kind != CHC_NOTHING && t->kind != CHC_VOID) {
+        size_t nl;
+        const char *nm = chc_type_name(t, &nl);
+        return chc__err_set(err, CHC_ERR_PROTOCOL,
+            "sparse serialization unsupported for %.*s", (int) nl, nm ? nm : "");
     }
-    int rc = chc__col_read_geo(in, depth - 1, (size_t) total,
-                               &c->array.values, err);
-    if (rc != CHC_OK) { chc__column_destroy(c, al); return rc; }
-    *out = c;
     return CHC_OK;
 }
 
-/* -------- block reader ---------- */
+/* Read has_custom flag & serialization kinds following column type. *out
+ * stays NULL when every kind is DEFAULT */
+static int
+chc__read_kinds(chc_in *in, const chc_type *t, uint8_t **out, size_t *out_len,
+                chc_err *err)
+{
+    uint8_t has_custom;
+    int rc = chc__read_byte(in, &has_custom, err);
+    if (rc != CHC_OK || !has_custom) return rc;
+    if (has_custom != 1)
+        return chc__err_set(err, CHC_ERR_PROTOCOL,
+            "invalid custom serialization flag %u", (unsigned) has_custom);
+    size_t n = chc__kinds_len(t);
+    uint8_t *k = chc__alloc(in->al, n, err);
+    if (!k) return CHC_ERR_OOM;
+    const uint8_t *cursor = k;
+    rc = chc__read_bytes(in, k, n, err);
+    if (rc == CHC_OK) rc = chc__kinds_check(t, &cursor, err);
+    if (rc != CHC_OK || !memchr(k, CHC__KIND_SPARSE, n)) {
+        in->al->free(in->al->ud, k, n);
+        return rc;
+    }
+    *out = k;
+    *out_len = n;
+    return CHC_OK;
+}
 
 struct chc_block {
     size_t        n_columns;
@@ -2698,7 +2861,8 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
 
     size_t nrows = b->n_rows;
     for (size_t i = *next_col; i < b->n_columns; i++) {
-        char *type_name = NULL; size_t type_len = 0;
+        char *type_name; size_t type_len;
+        uint8_t *kinds = NULL; size_t kinds_len = 0;
 
         /* Checkpoint column start so a mid-column would-block rewinds here,
          * dropping completed columns' wire bytes on the caller's next submit. */
@@ -2709,37 +2873,33 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
 
         rc = chc__read_string(in, &type_name, &type_len, err);
         if (rc != CHC_OK) goto col_fail;
-
-        if (opts->has_custom_serialization) {
-            uint8_t hcs;
-            rc = chc__read_byte(in, &hcs, err);
-            if (rc != CHC_OK) goto col_fail;
-            if (hcs) {
-                rc = chc__err_set(err, CHC_ERR_PROTOCOL,
-                    "custom serialization not supported on column '%s'", b->names[i]);
-                goto col_fail;
-            }
-        }
-
         rc = chc_type_parse(type_name, type_len, al, &b->types[i], err);
         al->free(al->ud, type_name, type_len + 1);
-        type_name = NULL;
         if (rc != CHC_OK) goto col_fail;
 
+        if (opts->has_custom_serialization) {
+            rc = chc__read_kinds(in, b->types[i], &kinds, &kinds_len, err);
+            if (rc != CHC_OK) goto col_fail;
+        }
+
+        /* Zero-row column carries kinds but no body, not even sparse offsets */
         if (nrows) {
             rc = chc__col_read_prefix(in, b->types[i], err);
             if (rc != CHC_OK) goto col_fail;
 
-            rc = chc__col_read(in, b->types[i], nrows, &b->columns[i], err);
+            const uint8_t *cursor = kinds;
+            rc = kinds ? chc__col_read_kinds(in, b->types[i], nrows, &cursor, &b->columns[i], err)
+                       : chc__col_read(in, b->types[i], nrows, &b->columns[i], err);
             if (rc != CHC_OK) goto col_fail;
         }
+        al->free(al->ud, kinds, kinds_len);
         continue;
 
     col_fail:
+        al->free(al->ud, kinds, kinds_len);
         if (ioless && rc == CHC_WOULD_BLOCK) {
             /* Retain columns [0,i); reset slot i to a destroy-safe NULL state
              * and rewind so column i re-parses from its checkpoint. */
-            if (type_name) al->free(al->ud, type_name, type_len + 1);
             if (b->names[i]) {
                 al->free(al->ud, b->names[i], b->name_lens[i] + 1);
                 b->names[i] = NULL;
@@ -2753,7 +2913,6 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
             *next_col = i;
             return CHC_WOULD_BLOCK;
         }
-        if (type_name) al->free(al->ud, type_name, type_len + 1);
         chc_block_destroy(b, al);
         *blk = NULL;
         return rc;
@@ -3060,34 +3219,6 @@ chc__col_write_prefix(chc_io *io, const chc_type *t, chc_err *err)
     return CHC_OK;
 }
 
-static int chc__col_write(chc_io *io, const chc_column *c, const chc_type *t,
-                          chc_err *err);
-
-/* Encode geo types as nested Arrays over Tuple(Float64, Float64), mirroring
- * chc__col_read_geo: 0 Point, 1 Ring & LineString, 2 Polygon &
- * MultiLineString, 3 MultiPolygon */
-static int
-chc__col_write_geo(chc_io *io, const chc_column *c, int depth, chc_err *err)
-{
-    int rc;
-    if (depth == 0) {
-        if (c->layout != CHC_COL_TUPLE || c->tuple.arity != 2)
-            return chc__err_set(err, CHC_ERR_TYPE, "Point: expected Tuple arity 2");
-        for (int i = 0; i < 2; i++) {
-            const chc_column *ch = c->tuple.children[i];
-            if (ch->layout != CHC_COL_FIXED)
-                return chc__err_set(err, CHC_ERR_TYPE, "Point: expected Float64 coords");
-            if (c->n_rows && (rc = chc__write_bytes(io, ch->fixed.data,
-                                                    c->n_rows * 8, err))) return rc;
-        }
-        return CHC_OK;
-    }
-    if (c->layout != CHC_COL_ARRAY)
-        return chc__err_set(err, CHC_ERR_TYPE, "geo: expected Array layer");
-    if ((rc = chc__write_u64_le_array(io, c->array.offsets, c->n_rows, err))) return rc;
-    return chc__col_write_geo(io, c->array.values, depth - 1, err);
-}
-
 /* Emit body from chc_column tree. Each node carries row count for its level.
  * Assume top-level block contains rows */
 static int
@@ -3203,12 +3334,13 @@ chc__col_write(chc_io *io, const chc_column *c, const chc_type *t, chc_err *err)
         if (t->n_children < 1) return chc__col_write_mismatch(err, t);
         return chc__col_write(io, c, t->children[0], err);
 
-    case CHC_POINT:             return chc__col_write_geo(io, c, 0, err);
+    case CHC_POINT:
     case CHC_RING:
-    case CHC_LINE_STRING:       return chc__col_write_geo(io, c, 1, err);
+    case CHC_LINE_STRING:
     case CHC_POLYGON:
-    case CHC_MULTI_LINE_STRING: return chc__col_write_geo(io, c, 2, err);
-    case CHC_MULTI_POLYGON:     return chc__col_write_geo(io, c, 3, err);
+    case CHC_MULTI_LINE_STRING:
+    case CHC_MULTI_POLYGON:
+        return chc__col_write(io, c, chc__geo_alias(t), err);
 
     case CHC_NOTHING:
     case CHC_VOID: {

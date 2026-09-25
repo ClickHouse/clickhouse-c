@@ -9,7 +9,8 @@ ZSTD adapters. Link `-llz4 -lzstd` by default; opt out of either adapter
 
 ## Frame layout
 
-Matches ClickHouse server / clickhouse-cpp `base/compressed.cpp`:
+Per the [Native Format spec, compression
+frame](https://clickhouse.com/docs/reference/interfaces/specs/NativeFormat#compression-frame):
 
 ```
 [ 16 B CityHash128 of the rest of the frame                ]
@@ -63,8 +64,8 @@ Bound callbacks may be NULL; the frame writer falls back to the LZ4
 classic `n + 256 + n/255` formula.
 
 Outgoing blocks are split into chunks of at most `CHC_COMPRESS_MAX_CHUNK`
-bytes (65 535) before each is wrapped in its own frame — matches
-clickhouse-cpp.
+bytes (65 535) before each is wrapped in its own frame, matching the
+historical 64 KiB client convention. The spec bounds frames at 1 GiB.
 
 ## Built-in LZ4 & ZSTD adapters
 

@@ -55,7 +55,9 @@ outlive the call.
 [clickhouse-compression.md](clickhouse-compression.md).
 
 `chc_async_server_info` returns the negotiated server info (revision is
-`min(client, server)`); meaningful only after the handshake completes.
+`min(client, server)`); meaningful only after the handshake completes, and
+left untouched by a partial Hello. Server revision floor & Hello limits match
+[clickhouse-client.md](clickhouse-client.md#opts--handshake).
 
 ## Drive
 
