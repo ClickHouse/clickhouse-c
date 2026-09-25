@@ -7,7 +7,7 @@ title: 'ClickHouse C client'
 doc_type: 'reference'
 ---
 
-`clickhouse-c` is a header-only C client for the ClickHouse [native protocol](/concepts/features/interfaces/tcp).
+`clickhouse-c` is a header-only C client for the ClickHouse [native protocol](/reference/interfaces/specs/NativeProtocol), carrying [Native format](/reference/interfaces/specs/NativeFormat) blocks.
 The source and per-header reference are in the [GitHub repository](https://github.com/ClickHouse/clickhouse-c).
 
 Unlike the higher-level clients, it does little for you on purpose. The core header decodes and
@@ -25,7 +25,7 @@ Understand however that this library is missing functionality by design.
 
 These are deliberate non-goals. Handle them in your application or with a sibling library:
 
-- HTTP protocol. Wrap libcurl directly for the [HTTP interface](/concepts/features/interfaces/http).
+- HTTP protocol. Wrap libcurl directly for the [HTTP interface](/interfaces/http).
 - DNS resolution, endpoint failover, connection pooling, retry, and backoff.
 - TLS context lifecycle. The OpenSSL backend uses an `SSL` you have already connected.
 - Threading. Each `chc_client` is single-threaded by design.
@@ -36,6 +36,8 @@ These are deliberate non-goals. Handle them in your application or with a siblin
 
 `clickhouse-c` ships as a flat set of headers. Each header holds both declarations and implementation,
 guarded by a sentinel macro. Pick the headers your build needs.
+
+TCP clients support ClickHouse 23.3 and newer (server revision 54462 or higher).
 
 | Header | Purpose | Link flags |
 |---|---|---|
@@ -132,7 +134,7 @@ callbacks synchronously; what those callbacks do underneath (`epoll`, `io_uring`
 
 ## Running a query {#running-a-query}
 
-Send the query, then drain packets until `CHC_PKT_END_OF_STREAM`. Use `chc_client_send_query_ex` to
+Send the query, then drain packets until `CHC_PKT_END_OF_STREAM` or `CHC_PKT_EXCEPTION`. Use `chc_client_send_query_ex` to
 attach the [required server setting](#server-setting); the bare `chc_client_send_query` sends an
 empty settings list and inherits whatever the server defaults to.
 
@@ -164,14 +166,15 @@ for (;;) {
         fprintf(stderr, "server: %s\n", pkt.exception->display_text);
     }
 
-    bool done = pkt.kind == CHC_PKT_END_OF_STREAM;
+    bool done = pkt.kind == CHC_PKT_END_OF_STREAM || pkt.kind == CHC_PKT_EXCEPTION;
     chc_packet_clear(client, &pkt);
     if (done) break;
 }
 ```
 
 Server exceptions arrive as `CHC_PKT_EXCEPTION` packets, not as a non-OK return from
-`chc_client_recv_packet`. Only transport-level failures return non-OK. The first `CHC_PKT_DATA`
+`chc_client_recv_packet`. Transport, protocol, and decode failures return non-OK.
+An exception terminates a query without a following EndOfStream packet. The first `CHC_PKT_DATA`
 packet of a result is a header block describing the schema with zero rows; data blocks follow.
 `chc_packet_clear` frees the packet's block or exception — null those fields on the packet first to
 take ownership instead.
@@ -191,6 +194,7 @@ slicing the string data.
 | `CHC_COL_ARRAY` | `chc_column_array_offsets(c)` (cumulative ends), `chc_column_array_values(c)`; `Map` decodes as `Array(Tuple(K, V))` |
 | `CHC_COL_TUPLE` | `chc_column_tuple_arity(c)`, `chc_column_tuple_child(c, i)` — each child has the same row count |
 | `CHC_COL_LOW_CARDINALITY` | `chc_column_lc_key_size(c)` (1/2/4/8), `chc_column_lc_keys(c)`, `chc_column_lc_dict(c)`; dictionary slot 0 is the default value |
+| `CHC_COL_NOTHING` | `chc_column_n_rows(c)`; `Nothing` and `Void` have no value data to access |
 
 A reader for plain numeric, string, and nullable columns:
 
@@ -209,7 +213,8 @@ void print_value(const chc_type *t, const chc_column *c, size_t row)
            local to avoid unaligned loads and strict-aliasing UB, then
            byte-swap on big-endian hosts. */
         size_t es;
-        const uint8_t *p = chc_column_fixed_data(c, &es) + row * es;
+        const uint8_t *p = chc_column_fixed_data(c, &es);
+        p += row * es;
         switch (chc_type_kind(t)) {
         case CHC_UINT64: { uint64_t v; memcpy(&v, p, sizeof v); printf("%" PRIu64, v); break; }
         case CHC_INT32:  { int32_t  v; memcpy(&v, p, sizeof v); printf("%" PRId32, v); break; }
@@ -247,10 +252,14 @@ Build columns with the `chc_build_*` helpers, append them to a `chc_block_builde
 copying, so the storage, column trees, types, names, and slabs must outlive the send. An INSERT sends
 the query, waits for the server's header block, sends one or more data blocks, then sends an empty
 block to terminate the stream.
+Reuse `qopts` from [Running a query](#running-a-query) to pin text type names.
 
 ```c
 const char *sql = "INSERT INTO greetings (id, message) VALUES";
-chc_client_send_query(client, sql, strlen(sql), "", 0, &err);
+if (chc_client_send_query_ex(client, sql, strlen(sql), &qopts, &err) != CHC_OK) {
+    fprintf(stderr, "query: %s\n", err.msg);
+    return 1;
+}
 
 /* Wait for the server's header block (schema, 0 rows). */
 bool got_header = false;
@@ -274,32 +283,50 @@ chc_block_builder_init(&bb, columns);
 
 uint64_t ids[3] = { 1, 2, 3 };
 chc_type *u64 = NULL;
-chc_type_parse("UInt64", 6, &al, &u64, &err);
+if (chc_type_parse("UInt64", 6, &al, &u64, &err) != CHC_OK) {
+    fprintf(stderr, "type: %s\n", err.msg);
+    return 1;
+}
 chc_column id = chc_build_fixed(ids, sizeof ids[0], 3);
 chc_block_builder_append(&bb, "id", 2, u64, &id);
 
 /* String columns: cumulative exclusive end offsets + a packed byte slab. */
-uint64_t offsets[3] = { 5, 11, 20 };   /* "hello", "buenas", "goedendag" */
+uint64_t offsets[3] = { 5, 11, 19 };   /* "hello", "buenas", "goedendag" */
 const uint8_t bytes[] = "hellobuenasgoedendag";
 chc_type *string = NULL;
-chc_type_parse("String", 6, &al, &string, &err);
+if (chc_type_parse("String", 6, &al, &string, &err) != CHC_OK) {
+    fprintf(stderr, "type: %s\n", err.msg);
+    chc_type_destroy(u64, &al);
+    return 1;
+}
 chc_column message = chc_build_string(offsets, bytes, 3);
 chc_block_builder_append(&bb, "message", 7, string, &message);
 
-chc_client_send_data(client, &bb, &err);  /* the populated block */
-chc_client_send_data(client, NULL, &err); /* empty block ends the INSERT */
-
-/* Drain to EndOfStream. */
-for (;;) {
-    chc_packet pkt = {};
-    chc_client_recv_packet(client, &pkt, &err);
-    bool done = pkt.kind == CHC_PKT_END_OF_STREAM;
-    chc_packet_clear(client, &pkt);
-    if (done) break;
-}
+int insert_rc = chc_client_send_data(client, &bb, &err);
+if (insert_rc == CHC_OK)
+    insert_rc = chc_client_send_data(client, NULL, &err);
 
 chc_type_destroy(u64, &al);
 chc_type_destroy(string, &al);
+if (insert_rc != CHC_OK) {
+    fprintf(stderr, "send: %s\n", err.msg);
+    return 1;
+}
+
+/* Drain until completion or exception. */
+for (;;) {
+    chc_packet pkt = {};
+    if (chc_client_recv_packet(client, &pkt, &err) != CHC_OK) {
+        fprintf(stderr, "recv: %s\n", err.msg);
+        return 1;
+    }
+    bool failed = pkt.kind == CHC_PKT_EXCEPTION;
+    bool done = pkt.kind == CHC_PKT_END_OF_STREAM;
+    if (failed) fprintf(stderr, "server: %s\n", pkt.exception->display_text);
+    chc_packet_clear(client, &pkt);
+    if (failed) return 1;
+    if (done) break;
+}
 ```
 
 `chc_build_fixed` takes `n_rows * elem_size` little-endian bytes; `chc_build_string` takes cumulative
@@ -375,7 +402,10 @@ parser resumes mid-block.
 
 chc_async_client *c = NULL;
 chc_client_opts opts = { .user = "default" };
-chc_async_client_init(&c, &opts, &al, &err);
+if (chc_async_client_init(&c, &opts, &al, &err) != CHC_OK) {
+    fprintf(stderr, "init: %s\n", err.msg);
+    return 1;
+}
 
 chc_exception *exc = NULL;
 int rc;
@@ -392,19 +422,29 @@ if (rc != CHC_OK) {
     return 1;
 }
 
-chc_async_send_query(c, sql, strlen(sql), "", 0, &err);
+if (chc_async_send_query(c, sql, strlen(sql), "", 0, &err) != CHC_OK) {
+    fprintf(stderr, "query: %s\n", err.msg);
+    chc_async_client_free(c);
+    return 1;
+}
 
 for (;;) {
     chc_packet pkt = {};
     int rc = chc_async_recv_packet(c, &pkt, &err);
     if (rc == CHC_WOULD_BLOCK) { pump(c); continue; }
-    if (rc != CHC_OK) break;
+    if (rc != CHC_OK) {
+        fprintf(stderr, "recv: %s\n", err.msg);
+        break;
+    }
 
-    bool done = pkt.kind == CHC_PKT_END_OF_STREAM;
+    bool done = pkt.kind == CHC_PKT_END_OF_STREAM || pkt.kind == CHC_PKT_EXCEPTION;
     if (pkt.kind == CHC_PKT_DATA && pkt.block) { /* read columns as above */ }
+    if (pkt.kind == CHC_PKT_EXCEPTION)
+        fprintf(stderr, "server: %s\n", pkt.exception->display_text);
     chc_async_packet_clear(c, &pkt);
     if (done) break;
 }
+chc_async_client_free(c);
 ```
 
 Your `pump` moves bytes both ways. Outbound, `chc_async_pending_out` hands back a pointer and length
@@ -464,9 +504,10 @@ The block reader decodes:
 - `Enum8`, `Enum16`
 - `Nullable(T)`, `Array(T)`, `Tuple(...)`, `Map(K, V)`; `Nested(...)` as `Array(Tuple(...))`
 - `LowCardinality(T)`
+- `Nothing`, `Void`
 - `Interval`
 - `QBit(...)`
-- `Point`, `Ring`, `Polygon`, `MultiPolygon`
+- `Point`, `Ring`, `LineString`, `Polygon`, `MultiLineString`, `MultiPolygon`
 - `SimpleAggregateFunction(f, T)`, which decodes as its inner `T`
 - `JSON` and `Object('json')`, as `String` columns under string serialization (see below)
 

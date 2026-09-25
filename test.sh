@@ -49,6 +49,7 @@ run_one() {
     [[ $name == compression_errors ]] && libs+=(-llz4 -lzstd)
     [[ $name == client_errors ]] && libs+=(-llz4)
     [[ $name == async_compressed ]] && libs+=(-llz4)
+    [[ $name == sparse ]] && libs+=(-llz4)
     [[ $name == compress_no_sync ]] && libs+=(-llz4)
     [[ $name == compress_no_async ]] && libs+=(-llz4)
     [[ $name == openssl_io ]] && libs+=(-lssl -lcrypto -lpthread)

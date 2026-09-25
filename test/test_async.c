@@ -44,7 +44,7 @@ static const char *current_test = "";
 #include "test_golden_blocks.h"
 
 /* Fixed revision: block_info + custom_serialization + temp tables all on. */
-#define TEST_REVISION CHC_CLIENT_DEFAULT_REVISION
+#define TEST_REVISION CHC_CLIENT_REVISION
 
 static chc_alloc test_make_alloc(void) { return chc_alloc_stdlib(); }
 
@@ -76,7 +76,7 @@ build_response_stream(const chc_alloc *al, const chc_block_opts *opts,
 typedef struct {
     chc_packet_kind kind;
     chc_block      *block;          /* owned; for DATA kinds */
-    uint64_t        prog[5];        /* rows, bytes, total_rows, w_rows, w_bytes */
+    uint64_t        prog[7];        /* Progress fields in wire order */
 } rec_packet;
 
 static void
@@ -103,7 +103,6 @@ oracle_decode(const uint8_t *bytes, size_t len, const chc_alloc *al,
     c.io = &io;
     c.compression = CHC_COMP_NONE;
     c.codec = NULL;
-    c.client_revision = TEST_REVISION;
     c.server.revision = TEST_REVISION;
     if (chc_in_init(&c.in, &io, al, 0, err)) return -1;
 
@@ -123,8 +122,10 @@ oracle_decode(const uint8_t *bytes, size_t len, const chc_alloc *al,
             out[n].prog[0] = pkt.progress.rows;
             out[n].prog[1] = pkt.progress.bytes;
             out[n].prog[2] = pkt.progress.total_rows;
-            out[n].prog[3] = pkt.progress.written_rows;
-            out[n].prog[4] = pkt.progress.written_bytes;
+            out[n].prog[3] = pkt.progress.total_bytes;
+            out[n].prog[4] = pkt.progress.written_rows;
+            out[n].prog[5] = pkt.progress.written_bytes;
+            out[n].prog[6] = pkt.progress.elapsed_ns;
             break;
         default:
             break;
@@ -186,8 +187,10 @@ subject_decode(const uint8_t *bytes, size_t len, size_t chunk,
             out[n].prog[0] = pkt.progress.rows;
             out[n].prog[1] = pkt.progress.bytes;
             out[n].prog[2] = pkt.progress.total_rows;
-            out[n].prog[3] = pkt.progress.written_rows;
-            out[n].prog[4] = pkt.progress.written_bytes;
+            out[n].prog[3] = pkt.progress.total_bytes;
+            out[n].prog[4] = pkt.progress.written_rows;
+            out[n].prog[5] = pkt.progress.written_bytes;
+            out[n].prog[6] = pkt.progress.elapsed_ns;
             break;
         default:
             break;
@@ -253,7 +256,7 @@ test_recv_golden_chunk(void)
                 continue;
             }
             if (oracle[i].kind == CHC_PKT_PROGRESS) {
-                for (int k = 0; k < 5; k++)
+                for (int k = 0; k < 7; k++)
                     if (subj[i].prog[k] != oracle[i].prog[k]) {
                         fprintf(stderr, "%s: chunk=%zu pkt %zu prog[%d] %llu != %llu\n",
                                 current_test, chunks[ci], i, k,
@@ -280,9 +283,9 @@ test_recv_golden_chunk(void)
 /* ---------------- handshake state machine in isolation ------------------- */
 
 /* Build a server->client Hello+Pong stream the handshake driver consumes.
- * Hello layout (chc__client_recv_hello, revision >= patch): tag, name string,
- * version_major, version_minor, revision, [timezone], [display_name],
- * [version_patch]. Then Pong tag. */
+ * Hello layout (chc__client_recv_hello): tag, name string, version_major,
+ * version_minor, revision, timezone, display_name, version_patch, password
+ * rule pairs, 8-byte nonce. Then Pong tag. */
 static uint8_t *
 build_hello_pong(const chc_alloc *al, size_t *out_len)
 {
@@ -297,9 +300,13 @@ build_hello_pong(const chc_alloc *al, size_t *out_len)
         chc__write_varuint(&io, 24, &err) ||        /* version_major */
         chc__write_varuint(&io, 8, &err) ||         /* version_minor */
         chc__write_varuint(&io, rev, &err) ||       /* revision */
-        chc__write_string(&io, "UTC", 3, &err) ||   /* timezone (>= 54058) */
-        chc__write_string(&io, "test-host", 9, &err) || /* display_name (>= 54372) */
-        chc__write_varuint(&io, 3, &err) ||         /* version_patch (>= 54401) */
+        chc__write_string(&io, "UTC", 3, &err) ||   /* timezone */
+        chc__write_string(&io, "test-host", 9, &err) || /* display_name */
+        chc__write_varuint(&io, 3, &err) ||         /* version_patch */
+        chc__write_varuint(&io, 1, &err) ||         /* password rules */
+        chc__write_string(&io, "^.{8,}$", 7, &err) ||
+        chc__write_string(&io, "8 chars", 7, &err) ||
+        chc__write_u64_le(&io, 0x0123456789abcdefu, &err) || /* nonce */
         chc__write_varuint(&io, CHC_PKT_PONG, &err)) {
         fprintf(stderr, "build_hello_pong: %s\n", err.msg);
         test_mem_sink_free(&s);

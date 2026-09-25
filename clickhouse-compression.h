@@ -12,8 +12,10 @@
  * ZSTD wrapper (chc_zstd_codec_init) is compiled in by default & pulls
  * <zstd.h>; link -lzstd. Define CHC_NO_ZSTD before including to opt out.
  *
- * Frame layout (matches ClickHouse server / clickhouse-cpp
- * base/compressed.cpp):
+ * Frame layout per the Native Format spec:
+ *   clickhouse.com/docs/reference/interfaces/specs/NativeFormat#compression-frame
+ *
+ *   checksum covers everything from offset 16 (method + sizes + payload).
  *
  *   [ 16 B CityHash128 of the rest of the frame                ]
  *   [  1 B method (0x82 LZ4, 0x90 ZSTD, 0x02 none)              ]
@@ -77,12 +79,13 @@ struct chc_codec {
     size_t (*zstd_bound)(size_t src_len);
 };
 
-/* Default chunk size for outgoing frames (matches clickhouse-cpp). */
+/* Default chunk size for outgoing frames. The Native Format spec bounds
+ * a frame at 1 GiB; we stay well under it at 64 KiB. */
 #define CHC_COMPRESS_MAX_CHUNK 65535u
 
 /* Internal-but-exported: 128-bit CityHash. Returned as the two 64-bit
  * halves the wire-format encodes (lo first, hi second). Frozen variant
- * matching CH server / clickhouse-cpp. */
+ * the server uses. */
 void chc_cityhash128(const void *data, size_t len,
                      uint64_t *out_lo, uint64_t *out_hi);
 

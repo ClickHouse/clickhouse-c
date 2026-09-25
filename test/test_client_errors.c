@@ -22,11 +22,11 @@ static const char *current_test = "";
 
 #include "test_common.h"
 
-#define REV_MODERN CHC_CLIENT_DEFAULT_REVISION
+#define REV_MODERN CHC_CLIENT_REVISION
 
 /* ---------------- byte builder ------------------------------------------- */
 
-typedef struct { uint8_t d[4096]; size_t n; } wbuf;
+typedef struct { uint8_t d[8192]; size_t n; } wbuf;
 
 static void w8(wbuf *b, uint8_t v) { b->d[b->n++] = v; }
 
@@ -85,7 +85,6 @@ fake_up(fake *f, const chc_alloc *al, const wbuf *b, uint64_t revision,
     f->c.al = al;
     f->c.io = &f->wio;
     f->c.compression = CHC_COMP_NONE;
-    f->c.client_revision = revision;
     f->c.server.revision = revision;
     return chc_in_init(&f->c.in, &f->rio, al, 0, err);
 }
@@ -176,28 +175,6 @@ test_send_paths(void)
         fake_down(&f);
     } else
         fail_count++;
-
-    /* Settings and parameters need server support. */
-    chc_query_setting setting = { .name = "max_threads", .value = "1" };
-    chc_query_param param = { .name = "p", .value = "1" };
-
-    if (fake_up(&f, &al, &none, CHC__REV_SETTINGS_AS_STRINGS - 1, &err) == CHC_OK) {
-        chc_query_opts opts = { .settings = &setting, .n_settings = 1 };
-        CHECK(chc_client_send_query_ex(&f.c, "SELECT 1", 8, &opts, &err)
-              == CHC_ERR_PROTOCOL);
-        CHECK(strstr(err.msg, "settings unsupported") != NULL);
-        fake_down(&f);
-    } else
-        fail_count++;
-
-    if (fake_up(&f, &al, &none, CHC__REV_SETTINGS_AS_STRINGS - 1, &err) == CHC_OK) {
-        chc_query_opts opts = { .params = &param, .n_params = 1 };
-        CHECK(chc_client_send_query_ex(&f.c, "SELECT 1", 8, &opts, &err)
-              == CHC_ERR_PROTOCOL);
-        CHECK(strstr(err.msg, "parameters unsupported") != NULL);
-        fake_down(&f);
-    } else
-        fail_count++;
 }
 
 /* ---------------- recv side ---------------------------------------------- */
@@ -223,15 +200,12 @@ expect_packet(const char *what, const wbuf *b, uint64_t revision,
     fake_down(&f);
 }
 
-/* Empty block body for the revision under test. */
 static void
-wempty_block(wbuf *b, uint64_t revision)
+wempty_block(wbuf *b)
 {
-    if (revision >= CHC__REV_BLOCK_INFO) {
-        wvar(b, 1); w8(b, 0); wvar(b, 2);
-        for (int i = 0; i < 4; i++) w8(b, 0);
-        wvar(b, 0);
-    }
+    wvar(b, 1); w8(b, 0); wvar(b, 2);
+    for (int i = 0; i < 4; i++) w8(b, 0);
+    wvar(b, 0);
     wvar(b, 0);                                 /* n_cols */
     wvar(b, 0);                                 /* n_rows */
 }
@@ -253,16 +227,9 @@ test_recv_packets(void)
         b = (wbuf) {};
         wvar(&b, blockish[i]);
         wstr(&b, "");                           /* temp table name / log tag */
-        wempty_block(&b, REV_MODERN);
+        wempty_block(&b);
         expect_packet("block-bearing", &b, REV_MODERN, CHC_OK, blockish[i]);
     }
-
-    /* Pre-temporary-tables servers omit the leading string on Data. */
-    b = (wbuf) {};
-    wvar(&b, CHC_PKT_DATA);
-    wempty_block(&b, CHC__REV_TEMPORARY_TABLES - 1);
-    expect_packet("data, old revision", &b, CHC__REV_TEMPORARY_TABLES - 1,
-                  CHC_OK, CHC_PKT_DATA);
 
     /* Truncated ProfileInfo. */
     b = (wbuf) {}; wvar(&b, CHC_PKT_PROFILE_INFO); wvar(&b, 1);
@@ -311,7 +278,6 @@ test_compressed_recv(void)
     c.al = &al;
     c.compression = CHC_COMP_LZ4;
     c.codec = NULL;
-    c.client_revision = REV_MODERN;
     c.server.revision = REV_MODERN;
     if (chc_in_init_ioless(&c.in, &al) == CHC_OK) {
         CHECK(chc_in_submit(&c.in, b.d, b.n, &err) == CHC_OK);
@@ -421,7 +387,6 @@ test_compressed_resume(void)
         c.al = &al;
         c.compression = CHC_COMP_LZ4;
         c.codec = &codec;
-        c.client_revision = REV_MODERN;
         c.server.revision = REV_MODERN;
         chc_err err = {};
         if (chc_in_init_ioless(&c.in, &al) != CHC_OK) { fail_count++; continue; }
@@ -471,7 +436,6 @@ test_compressed_resume_oom(void)
         c.al = &fal;
         c.compression = CHC_COMP_LZ4;
         c.codec = &codec;
-        c.client_revision = REV_MODERN;
         c.server.revision = REV_MODERN;
         chc_err err = {};
 
@@ -556,34 +520,223 @@ test_async_wrappers(void)
     }
 }
 
-/* A server announcing a newer revision is clamped to what the client speaks. */
+/* ---------------- handshake & control packets --------------------------- */
+
+/* Server Hello as 23.3+ sends it: password rules & nonce always present */
 static void
-test_async_revision_clamp(void)
+whello(wbuf *b, uint64_t revision, uint64_t n_rules)
 {
-    current_test = "async_revision_clamp";
+    wvar(b, CHC_PKT_HELLO);
+    wstr(b, "ClickHouse");
+    wvar(b, 99);                                /* version major */
+    wvar(b, 1);                                 /* version minor */
+    wvar(b, revision);
+    wstr(b, "UTC");
+    wstr(b, "host");
+    wvar(b, 7);                                 /* version patch */
+    wvar(b, n_rules);
+    for (uint64_t i = 0; i < n_rules; i++) {
+        wstr(b, i ? "" : "^.{8,}$");
+        wstr(b, i ? "" : "8 chars");
+    }
+    for (int i = 0; i < 8; i++) w8(b, (uint8_t) (0xa0 + i));  /* nonce */
+}
+
+typedef struct { test_mem_src src; test_mem_sink sink; } duplex;
+
+static int
+duplex_read(void *ud, void *buf, size_t len, size_t *out_n, chc_err *err)
+{
+    return test_mem_read(&((duplex *) ud)->src, buf, len, out_n, err);
+}
+
+static int
+duplex_write(void *ud, const void *buf, size_t n, chc_err *err)
+{
+    return test_mem_sink_write(&((duplex *) ud)->sink, buf, n, err);
+}
+
+/* Blocking handshake over b, returning negotiated revision or 0 on failure */
+static int
+sync_handshake(const wbuf *b, chc_server_info *si, chc_err *err)
+{
     chc_alloc al = chc_alloc_stdlib();
-    chc_err err = {};
+    duplex d = { .src = { .data = b->d, .len = b->n } };
+    chc_io io = { .ud = &d, .read = duplex_read, .write = duplex_write };
+    chc_client_opts opts = {};
+    chc_client *c = NULL;
+    int rc = chc_client_init(&c, &opts, &al, &io, NULL, err);
+    if (rc == CHC_OK) *si = *chc_client_server_info(c);
+    chc_client_close(c);
+    test_mem_sink_free(&d.sink);
+    return rc;
+}
+
+/* Async handshake fed one byte at a time, server info must stay unpublished
+ * until Hello completes */
+static int
+async_handshake(const wbuf *b, chc_server_info *si, chc_err *err)
+{
+    chc_alloc al = chc_alloc_stdlib();
+    chc_client_opts opts = {};
     chc_async_client *c = NULL;
-    chc_client_opts opts = { .client_revision = REV_MODERN };
-    if (chc_async_client_init(&c, &opts, &al, &err) != CHC_OK) { fail_count++; return; }
+    int rc = chc_async_client_init(&c, &opts, &al, err);
+    if (rc != CHC_OK) return rc;
+    for (size_t fed = 0; ; fed++) {
+        rc = chc_async_handshake(c, NULL, err);
+        if (rc != CHC_WOULD_BLOCK || fed == b->n) break;
+        CHECK(c->hs_phase != CHC__HS_RECV_HELLO || chc_async_server_info(c)->name[0] == '\0');
+        if ((rc = chc_async_submit(c, b->d + fed, 1, err))) break;
+    }
+    *si = *chc_async_server_info(c);
+    chc_async_client_free(c);
+    return rc;
+}
+
+static void
+test_handshake_revisions(void)
+{
+    current_test = "handshake_revisions";
+    static const uint64_t revs[] = { 54462, 54463, 54464, 54465, 54489 };
+    for (size_t i = 0; i < sizeof revs / sizeof *revs; i++) {
+        wbuf b = {};
+        whello(&b, revs[i], 1);
+        wvar(&b, CHC_PKT_PONG);
+        uint64_t want = revs[i] < CHC_CLIENT_REVISION ? revs[i] : CHC_CLIENT_REVISION;
+        chc_server_info si = {};
+        chc_err err = {};
+        CHECK(sync_handshake(&b, &si, &err) == CHC_OK);
+        CHECK_EQ_U64(si.revision, want);
+        CHECK_EQ_U64(si.version_patch, 7);
+        CHECK(strcmp(si.display_name, "host") == 0);
+        si = (chc_server_info) {};
+        CHECK(async_handshake(&b, &si, &err) == CHC_OK);
+        CHECK_EQ_U64(si.revision, want);
+        CHECK(strcmp(si.timezone, "UTC") == 0);
+    }
+}
+
+static void
+test_handshake_bounds(void)
+{
+    current_test = "handshake_bounds";
+    chc_server_info si;
+    chc_err err = {};
+    wbuf b;
+
+    b = (wbuf) {}; whello(&b, CHC_SERVER_MIN_REVISION - 1, 0); wvar(&b, CHC_PKT_PONG);
+    CHECK(sync_handshake(&b, &si, &err) == CHC_ERR_PROTOCOL);
+    CHECK(strstr(err.msg, "older than") != NULL);
+    CHECK(async_handshake(&b, &si, &err) == CHC_ERR_PROTOCOL);
+
+    b = (wbuf) {}; whello(&b, 54465, 256); wvar(&b, CHC_PKT_PONG);
+    CHECK(sync_handshake(&b, &si, &err) == CHC_OK);
+    CHECK(async_handshake(&b, &si, &err) == CHC_OK);
+
+    b = (wbuf) {}; whello(&b, 54465, 257); wvar(&b, CHC_PKT_PONG);
+    CHECK(sync_handshake(&b, &si, &err) == CHC_ERR_PROTOCOL);
+    CHECK(strstr(err.msg, "password rules") != NULL);
+    CHECK(async_handshake(&b, &si, &err) == CHC_ERR_PROTOCOL);
+
+    /* Length checked before any payload read */
+    b = (wbuf) {}; wvar(&b, CHC_PKT_HELLO); wvar(&b, 4097);
+    CHECK(sync_handshake(&b, &si, &err) == CHC_ERR_PROTOCOL);
+    CHECK(strstr(err.msg, "too long") != NULL);
+    CHECK(async_handshake(&b, &si, &err) == CHC_ERR_PROTOCOL);
+
+    /* Long server name truncates to buffer, 4096 accepted */
+    b = (wbuf) {};
+    wvar(&b, CHC_PKT_HELLO); wvar(&b, 4096);
+    for (int i = 0; i < 4096; i++) w8(&b, 'n');
+    wvar(&b, 1); wvar(&b, 1); wvar(&b, 54465);
+    wstr(&b, "UTC"); wstr(&b, "h"); wvar(&b, 0); wvar(&b, 0);
+    size_t before_nonce = b.n;
+    for (int i = 0; i < 8; i++) w8(&b, 0);
+    CHECK(b.n < sizeof b.d);
+    wvar(&b, CHC_PKT_PONG);
+    CHECK(sync_handshake(&b, &si, &err) == CHC_OK);
+    CHECK_EQ_U64(strlen(si.name), sizeof si.name - 1);
+
+    /* Truncated nonce */
+    b.n = before_nonce + 7;
+    CHECK(sync_handshake(&b, &si, &err) == CHC_ERR_EOF);
+    CHECK(async_handshake(&b, &si, &err) == CHC_WOULD_BLOCK);
+    CHECK(si.name[0] == '\0');
+}
+
+/* Ioless client past handshake at revision, bytes fed one at a time */
+static int
+recv_bytewise(chc_client *c, const wbuf *b, size_t *fed, chc_packet *pkt, chc_err *err)
+{
+    for (;;) {
+        int rc = chc_client_recv_packet(c, pkt, err);
+        if (rc != CHC_WOULD_BLOCK || *fed == b->n) return rc;
+        if ((rc = chc_in_submit(&c->in, b->d + (*fed)++, 1, err))) return rc;
+    }
+}
+
+static void
+test_progress_timezone(void)
+{
+    current_test = "progress_timezone";
+    chc_alloc al = chc_alloc_stdlib();
+    static const uint64_t revs[] = { 54462, 54463, 54465 };
+    for (size_t i = 0; i < sizeof revs / sizeof *revs; i++) {
+        bool has_total_bytes = revs[i] >= 54463;
+        wbuf b = {};
+        wvar(&b, CHC_PKT_PROGRESS);
+        wvar(&b, 1); wvar(&b, 2); wvar(&b, 3);
+        if (has_total_bytes) wvar(&b, 4);
+        wvar(&b, 5); wvar(&b, 6); wvar(&b, 7);
+        wvar(&b, CHC_PKT_TIMEZONE_UPDATE); wstr(&b, "Asia/Tokyo");
+        wvar(&b, CHC_PKT_TIMEZONE_UPDATE); wstr(&b, "");
+        wvar(&b, CHC_PKT_PONG);
+        wvar(&b, CHC_PKT_TIMEZONE_UPDATE); wstr(&b, "Europe/Paris");
+
+        chc_client c;
+        memset(&c, 0, sizeof c);
+        c.al = &al;
+        c.server.revision = revs[i];
+        strcpy(c.server.timezone, "UTC");
+        chc_err err = {};
+        if (chc_in_init_ioless(&c.in, &al) != CHC_OK) { fail_count++; continue; }
+
+        size_t fed = 0;
+        chc_packet pkt = {};
+        CHECK(recv_bytewise(&c, &b, &fed, &pkt, &err) == CHC_OK);
+        CHECK(pkt.kind == CHC_PKT_PROGRESS);
+        CHECK_EQ_U64(pkt.progress.rows, 1);
+        CHECK_EQ_U64(pkt.progress.bytes, 2);
+        CHECK_EQ_U64(pkt.progress.total_rows, 3);
+        CHECK_EQ_U64(pkt.progress.total_bytes, has_total_bytes ? 4 : 0);
+        CHECK_EQ_U64(pkt.progress.written_rows, 5);
+        CHECK_EQ_U64(pkt.progress.written_bytes, 6);
+        CHECK_EQ_U64(pkt.progress.elapsed_ns, 7);
+
+        CHECK(recv_bytewise(&c, &b, &fed, &pkt, &err) == CHC_OK);
+        CHECK(pkt.kind == CHC_PKT_TIMEZONE_UPDATE);
+        CHECK(strcmp(c.server.timezone, "Asia/Tokyo") == 0);
+        CHECK(recv_bytewise(&c, &b, &fed, &pkt, &err) == CHC_OK);
+        CHECK(pkt.kind == CHC_PKT_TIMEZONE_UPDATE);
+        CHECK(c.server.timezone[0] == '\0');
+        CHECK(recv_bytewise(&c, &b, &fed, &pkt, &err) == CHC_OK);
+        CHECK(pkt.kind == CHC_PKT_PONG);
+
+        /* Incomplete update leaves timezone untouched */
+        b.n--;
+        CHECK(recv_bytewise(&c, &b, &fed, &pkt, &err) == CHC_WOULD_BLOCK);
+        CHECK(c.server.timezone[0] == '\0');
+        b.n++;
+        CHECK(recv_bytewise(&c, &b, &fed, &pkt, &err) == CHC_OK);
+        CHECK(strcmp(c.server.timezone, "Europe/Paris") == 0);
+
+        chc__client_recv_state_free(&c);
+        chc_in_free(&c.in);
+    }
 
     wbuf b = {};
-    wvar(&b, CHC_PKT_HELLO);
-    wstr(&b, "ClickHouse");
-    wvar(&b, 99);                               /* version major */
-    wvar(&b, 1);                                /* version minor */
-    wvar(&b, REV_MODERN + 100);                 /* revision ahead of ours */
-    wstr(&b, "UTC");
-    wstr(&b, "host");
-    wvar(&b, 0);                                /* version patch */
-    wvar(&b, CHC_PKT_PONG);
-
-    CHECK(chc_async_handshake(c, NULL, &err) == CHC_WOULD_BLOCK);
-    CHECK(chc_async_submit(c, b.d, b.n, &err) == CHC_OK);
-    CHECK(chc_async_handshake(c, NULL, &err) == CHC_OK);
-    CHECK_EQ_U64(chc_async_server_info(c)->revision, REV_MODERN);
-
-    chc_async_client_free(c);
+    wvar(&b, CHC_PKT_TIMEZONE_UPDATE); wvar(&b, 4097);
+    expect_packet("oversized timezone", &b, REV_MODERN, CHC_ERR_PROTOCOL, CHC_PKT_HELLO);
 }
 
 int
@@ -596,7 +749,9 @@ main(void)
     test_compressed_resume();
     test_compressed_resume_oom();
     test_async_wrappers();
-    test_async_revision_clamp();
+    test_handshake_revisions();
+    test_handshake_bounds();
+    test_progress_timezone();
 
     if (fail_count) {
         fprintf(stderr, "%d failure(s)\n", fail_count);

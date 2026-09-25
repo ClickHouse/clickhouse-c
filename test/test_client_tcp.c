@@ -49,11 +49,12 @@ static const char *current_test = "";
 #define TEST_PORT     19000
 
 static pid_t g_server_pid = -1;
+static uint16_t g_port = TEST_PORT;
 
 static int
 connect_to_server(void)
 {
-    return test_clickhouse_connect(TEST_PORT);
+    return test_clickhouse_connect(g_port);
 }
 
 static void
@@ -437,7 +438,7 @@ test_handshake(void)
     const chc_server_info *si = chc_client_server_info(t.c);
     CHECK(si != NULL);
     CHECK(strncmp(si->name, "ClickHouse", 10) == 0);
-    CHECK(si->revision >= 54400);
+    CHECK(si->revision >= CHC_SERVER_MIN_REVISION);
     CHECK(si->version_major >= 1);
 out:
     close_conn(&t);
@@ -675,7 +676,7 @@ test_select_with_param(void)
     int rc = open_conn(&t, &err); CHECK_OK(rc, err);
 
     /* Param values pass through Field::restoreFromDump on the server, so
-     * a String must arrive single-quoted (matches clickhouse-cpp). */
+     * a String must arrive single-quoted. */
     chc_query_param params[1] = {
         { .name = "p1", .value = "'hello world'" },
     };
@@ -694,9 +695,9 @@ out:
 }
 
 /*
- * Array(String) parameter with inner quotes. clickhouse-cpp's
- * Client::SetParam wraps the value in single quotes & escapes inner
- * `'` to `\x27`; chc passes the value verbatim per the doc on
+ * Array(String) parameter with inner quotes. The value must be a fully
+ * formed Field literal: wrapped in single quotes, inner `'` escaped as
+ * `\x27`; chc passes the value verbatim per the doc on
  * chc_query_param. A caller that does NOT escape inner quotes ends up
  * with the server stopping at the first `'` inside the array literal,
  * surfacing as "value [ cannot be parsed as Array(String) for query
@@ -712,8 +713,8 @@ test_select_with_array_param(void)
     int rc = open_conn(&t, &err); CHECK_OK(rc, err);
 
     /* Pre-escaped Array(String) literal: outer quote, inner quotes as
-     * \x27, comma between elements. Matches what a caller mirroring
-     * clickhouse-cpp's WriteQuotedString would produce. */
+     * \x27, comma between elements -- the form the server's Field parser
+     * reads back as a real Array(String). */
     chc_query_param params[1] = {
         { .name = "p1",
           .value = "'[\\x27foo\\x27,\\x27bar\\x27]'" },
@@ -740,6 +741,10 @@ test_select_many_lz4(void)
     test_conn t; chc_err err = {};
     int rc = open_conn_compressed(&t, CHC_COMP_LZ4, &err); CHECK_OK(rc, err);
 
+    /* ClickHouse 26.9 defaults network compression to ZSTD */
+    rc = run_simple_query(&t, "SET network_compression_method='lz4'", &err);
+    CHECK_OK(rc, err);
+
     /* 10 000 rows pushes the body past one LZ4 frame. */
     const char *sql =
         "SELECT number, toString(number) FROM system.numbers LIMIT 10000";
@@ -756,8 +761,7 @@ out:
 }
 
 static void
-run_insert_compressed_roundtrip(chc_compression comp, const char *table,
-                                bool set_zstd)
+run_insert_compressed_roundtrip(chc_compression comp, const char *table)
 {
     test_conn t;
     chc_err err = {};
@@ -770,10 +774,10 @@ run_insert_compressed_roundtrip(chc_compression comp, const char *table,
 
     int rc = open_conn_compressed(&t, comp, &err); CHECK_OK(rc, err);
 
-    if (set_zstd) {
-        rc = run_simple_query(&t, "SET network_compression_method='zstd'", &err);
-        CHECK_OK(rc, err);
-    }
+    rc = run_simple_query(&t, comp == CHC_COMP_ZSTD
+                                  ? "SET network_compression_method='zstd'"
+                                  : "SET network_compression_method='lz4'", &err);
+    CHECK_OK(rc, err);
 
     int sn = snprintf(sql, sizeof sql, "DROP TABLE IF EXISTS %s SYNC", table);
     CHECK(sn > 0 && (size_t) sn < sizeof sql);
@@ -846,7 +850,7 @@ static void
 test_insert_lz4_roundtrip(void)
 {
     current_test = "insert_lz4_roundtrip";
-    run_insert_compressed_roundtrip(CHC_COMP_LZ4, "test_lz4", false);
+    run_insert_compressed_roundtrip(CHC_COMP_LZ4, "test_lz4");
 }
 
 static void
@@ -856,8 +860,8 @@ test_select_many_zstd(void)
     test_conn t; chc_err err = {};
     int rc = open_conn_compressed(&t, CHC_COMP_ZSTD, &err); CHECK_OK(rc, err);
 
-    /* Server defaults to LZ4 for network responses; pin it to ZSTD so the
-     * codec's zstd_decompress path is the one exercised. */
+    /* Server defaults to LZ4 before 26.9; pin ZSTD so codec's
+     * zstd_decompress path is the one exercised. */
     rc = run_simple_query(&t,
         "SET network_compression_method='zstd'", &err);
     CHECK_OK(rc, err);
@@ -882,7 +886,7 @@ static void
 test_insert_zstd_roundtrip(void)
 {
     current_test = "insert_zstd_roundtrip";
-    run_insert_compressed_roundtrip(CHC_COMP_ZSTD, "test_zstd", true);
+    run_insert_compressed_roundtrip(CHC_COMP_ZSTD, "test_zstd");
 }
 
 /*
@@ -949,13 +953,183 @@ out:
     close_conn(&t);
 }
 
+/* Records server bytes so tests can see serialization kinds on the wire */
+typedef struct {
+    chc_io        inner;
+    test_mem_sink bytes;
+} rec_io;
+
+static int
+rec_read(void *ud, void *buf, size_t len, size_t *out_n, chc_err *err)
+{
+    rec_io *r = ud;
+    int rc = r->inner.read(r->inner.ud, buf, len, out_n, err);
+    if (rc == CHC_OK) rc = test_mem_sink_write(&r->bytes, buf, *out_n, err);
+    return rc;
+}
+
+static int
+rec_write(void *ud, const void *buf, size_t len, chc_err *err)
+{
+    rec_io *r = ud;
+    return r->inner.write(r->inner.ud, buf, len, err);
+}
+
+/* Column header naming name & type followed by has_custom=1, kinds after */
+static const uint8_t *
+find_custom_col(const test_mem_sink *m, const char *name, const char *type)
+{
+    uint8_t pat[128];
+    size_t nl = strlen(name), tl = strlen(type), n = 0;
+    pat[n++] = (uint8_t) nl; memcpy(pat + n, name, nl); n += nl;
+    pat[n++] = (uint8_t) tl; memcpy(pat + n, type, tl); n += tl;
+    pat[n++] = 1;
+    for (size_t i = 0; i + n <= m->len; i++)
+        if (memcmp(m->data + i, pat, n) == 0) return m->data + i + n;
+    return NULL;
+}
+
+typedef struct { size_t rows, bad; } sparse_acc;
+
+/* Rows with id % 97 == 0 hold values, others defaults */
+static void
+sparse_cb(const chc_block *b, void *ud)
+{
+    sparse_acc *a = ud;
+    CHECK(chc_block_n_columns(b) == 4);
+    if (chc_block_n_columns(b) != 4) return;
+    const uint32_t *id = chc_column_fixed_data(chc_block_column(b, 0), NULL);
+    const uint32_t *u = chc_column_fixed_data(chc_block_column(b, 1), NULL);
+    const chc_column *s = chc_block_column(b, 2);
+    const chc_column *t = chc_block_column(b, 3);
+    const uint64_t *ta = chc_column_fixed_data(chc_column_tuple_child(t, 0), NULL);
+    const chc_column *tb = chc_column_tuple_child(t, 1);
+    const uint64_t *so = chc_column_string_offsets(s);
+    const uint8_t *sd = chc_column_string_data(s);
+    const uint64_t *tbo = chc_column_string_offsets(tb);
+    CHECK(id && u && so && ta && tbo);
+    if (!id || !u || !so || !ta || !tbo) return;
+    for (size_t r = 0; r < chc_block_n_rows(b); r++, a->rows++) {
+        bool nd = id[r] % 97 == 0;
+        char want[16];
+        int wl = nd ? snprintf(want, sizeof want, "v%u", id[r]) : 0;
+        uint64_t from = r ? so[r - 1] : 0;
+        if (u[r] != (nd ? id[r] : 0) || ta[r] != (nd ? id[r] : 0)
+            || so[r] - from != (uint64_t) wl
+            || (wl && memcmp(sd + from, want, (size_t) wl) != 0)
+            || tbo[r] != 0)
+            a->bad++;
+    }
+}
+
+/* Read default-heavy sparse_t over io, report whether sparse kinds arrived
+ * for scalar & Tuple child. Return negotiated revision */
+static uint64_t
+sparse_select(chc_io io, bool *scalar, bool *tuple_child)
+{
+    test_conn t = { .fd = -1 }; chc_err err = {};
+    rec_io rec = { .inner = io };
+    uint64_t revision = 0;
+    t.al = chc_alloc_stdlib();
+    t.io = (chc_io) { .ud = &rec, .read = rec_read, .write = rec_write };
+    chc_client_opts opts = {};
+    int rc = chc_client_init(&t.c, &opts, &t.al, &t.io, NULL, &err);
+    CHECK_OK(rc, err);
+    revision = chc_client_server_info(t.c)->revision;
+
+    rc = send_query(&t, "SELECT id, u, s, t FROM sparse_t", &err);
+    CHECK_OK(rc, err);
+    sparse_acc acc = {};
+    rc = recv_until_eos(&t, 256, sparse_cb, &acc, &err);
+    CHECK_OK(rc, err);
+    CHECK_EQ_U64(acc.rows, 1000);
+    CHECK_EQ_U64(acc.bad, 0);
+
+    const uint8_t *k = find_custom_col(&rec.bytes, "u", "UInt32");
+    *scalar = k && k[0] == 1 && find_custom_col(&rec.bytes, "s", "String");
+    k = find_custom_col(&rec.bytes, "t", "Tuple(a UInt64, b String)");
+    *tuple_child = k && (k[1] == 1 || k[2] == 1);
+out:
+    close_conn(&t);
+    test_mem_sink_free(&rec.bytes);
+    return revision;
+}
+
+static int
+discard_write(void *ud, const void *buf, size_t n, chc_err *err)
+{
+    return CHC_OK;
+}
+
+static int
+file_read(void *ud, void *buf, size_t len, size_t *out_n, chc_err *err)
+{
+    *out_n = fread(buf, 1, len, ud);
+    return ferror(ud) ? chc__err_set(err, CHC_ERR_IO, "fread failed") : CHC_OK;
+}
+
+/* Regenerate: run clickhouse/clickhouse-server:23.3.22.3, proxy it through
+ * tools/capture.py --match 'FROM sparse_t', run this test with CHC_TEST_PORT
+ * 23.8+ strips sparse below revision 54465, older servers send it from 54454 */
+static void
+test_sparse_ch23_3_replay(void)
+{
+    current_test = "sparse_ch23_3_replay";
+    FILE *f = fopen("test/ch23_3_sparse.bin", "rb");
+    CHECK(f);
+    if (!f) return;
+    chc_io io = { .ud = f, .read = file_read, .write = discard_write };
+    bool scalar = false, tuple_child = false;
+    CHECK_EQ_U64(sparse_select(io, &scalar, &tuple_child), CHC_SERVER_MIN_REVISION);
+    fclose(f);
+    CHECK(scalar);
+    CHECK(tuple_child);
+}
+
+static void
+test_sparse_live(void)
+{
+    current_test = "sparse_live";
+    test_conn t; chc_err err = {};
+    int rc = open_conn(&t, &err); CHECK_OK(rc, err);
+    rc = run_simple_query(&t, "DROP TABLE IF EXISTS sparse_t SYNC", &err);
+    CHECK_OK(rc, err);
+    rc = run_simple_query(&t,
+        "CREATE TABLE sparse_t (id UInt32, u UInt32, s String,"
+        " t Tuple(a UInt64, b String)) ENGINE = MergeTree ORDER BY id"
+        " SETTINGS ratio_of_defaults_for_sparse_serialization = 0.5,"
+        " min_bytes_for_wide_part = 0", &err);
+    CHECK_OK(rc, err);
+    rc = run_simple_query(&t,
+        "INSERT INTO sparse_t SELECT number, if(number % 97 = 0, number, 0),"
+        " if(number % 97 = 0, concat('v', toString(number)), ''),"
+        " tuple(if(number % 97 = 0, number, 0), '') FROM numbers(1000)", &err);
+    CHECK_OK(rc, err);
+
+    chc_posix_io sel_state;
+    chc_io sel_io;
+    int fd = connect_to_server();
+    CHECK(fd >= 0);
+    chc_posix_io_init(&sel_state, &sel_io, fd, NULL, NULL);
+    bool scalar = false, tuple_child = false;
+    sparse_select(sel_io, &scalar, &tuple_child);
+    close(fd);
+    CHECK(scalar);
+    CHECK(tuple_child);
+
+    rc = run_simple_query(&t, "DROP TABLE IF EXISTS sparse_t SYNC", &err);
+    CHECK_OK(rc, err);
+out:
+    close_conn(&t);
+}
+
 static void
 test_cityhash_known_vector(void)
 {
     current_test = "cityhash_known_vector";
-    /* Spot-check CityHash128 against the upstream test vector for an
-     * empty string and a short fixed input. Reference values produced
-     * via clickhouse-cpp's CityHash128 on the same inputs. */
+    /* Spot-check CityHash128 against known vectors for an empty string
+     * and a short fixed input, using the frozen CityHash128 variant the
+     * compression frame mandates. */
     uint64_t lo, hi;
     chc_cityhash128("", 0, &lo, &hi);
     CHECK(lo == 0x3df09dfc64c09a2bULL);
@@ -982,13 +1156,20 @@ int main(void)
     signal(SIGPIPE, SIG_IGN);
 
     test_cityhash_known_vector();
+    test_sparse_ch23_3_replay();
 
-    g_server_pid = test_clickhouse_server_start(TEMP_ROOT_DIR, TEST_PORT);
-    if (g_server_pid < 0) {
-        fprintf(stderr, "failed to start clickhouse-server; skipping tests\n");
-        return 77;   /* automake-style "skipped" */
+    /* CHC_TEST_PORT targets running server, eg docker image of older release */
+    const char *port = getenv("CHC_TEST_PORT");
+    if (port) {
+        g_port = (uint16_t) atoi(port);
+    } else {
+        g_server_pid = test_clickhouse_server_start(TEMP_ROOT_DIR, TEST_PORT);
+        if (g_server_pid < 0) {
+            fprintf(stderr, "failed to start clickhouse-server; skipping tests\n");
+            return fail_count ? 1 : 77;   /* automake-style "skipped" */
+        }
+        atexit(stop_server);
     }
-    atexit(stop_server);
 
     test_handshake();
     test_bad_database();
@@ -1006,6 +1187,7 @@ int main(void)
     test_insert_zstd_roundtrip();
     test_qbit_live();
     test_simple_aggregate_live();
+    test_sparse_live();
 
     stop_server();
 

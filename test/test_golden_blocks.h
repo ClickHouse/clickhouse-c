@@ -146,8 +146,10 @@ test_write_progress_packet(chc_io *io, chc_err *err)
     if ((rc = chc__write_varuint(io, 1000, err))) return rc;
     if ((rc = chc__write_varuint(io, 8000, err))) return rc;
     if ((rc = chc__write_varuint(io, 5000, err))) return rc;
+    if ((rc = chc__write_varuint(io, 40000, err))) return rc;
     if ((rc = chc__write_varuint(io, 7, err))) return rc;
-    return chc__write_varuint(io, 70, err);
+    if ((rc = chc__write_varuint(io, 70, err))) return rc;
+    return chc__write_varuint(io, 123456, err);
 }
 
 #ifdef CLICKHOUSE_COMPRESSION_H

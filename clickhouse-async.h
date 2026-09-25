@@ -129,16 +129,7 @@ chc_async_client_init(chc_async_client **out, const chc_client_opts *opts,
     if (!c) return CHC_ERR_OOM;
 
     c->cli.al = al;
-    c->cli.client_version_major = opts->client_version_major;
-    c->cli.client_version_minor = opts->client_version_minor;
-    c->cli.client_version_patch = opts->client_version_patch;
-    c->cli.client_revision = opts->client_revision ? opts->client_revision
-                                                   : CHC_CLIENT_DEFAULT_REVISION;
-    c->cli.compression = opts->codec ? opts->compression : CHC_COMP_NONE;
-    c->cli.codec       = opts->codec;
-    /* Seed server.revision so block/packet framing is well-defined before the
-     * handshake completes; recv after handshake uses min(client, server). */
-    c->cli.server.revision = c->cli.client_revision;
+    chc__client_setup(&c->cli, opts);
 
     chc__mem_sink_init(&c->out, &c->out_io, al);
     c->cli.io = &c->out_io;
@@ -216,7 +207,6 @@ chc_async_handshake(chc_async_client *c, chc_exception **exc, chc_err *err)
                 .client_version_major = cli->client_version_major,
                 .client_version_minor = cli->client_version_minor,
                 .client_version_patch = cli->client_version_patch,
-                .client_revision = cli->client_revision,
                 .database = c->database,
                 .user = c->user,
                 .password = c->password,
@@ -233,16 +223,12 @@ chc_async_handshake(chc_async_client *c, chc_exception **exc, chc_err *err)
             if (rc == CHC_WOULD_BLOCK) { chc__in_rewind(&cli->in); return rc; }
             if (rc != CHC_OK) return rc;  /* server exception / protocol */
             chc_in_reset(&cli->in);
-            if (cli->server.revision > cli->client_revision)
-                cli->server.revision = cli->client_revision;
             c->hs_phase = CHC__HS_POST_HELLO;
             continue;
 
         case CHC__HS_POST_HELLO:
-            if (cli->server.revision >= CHC__REV_ADDENDUM) {
-                rc = chc__write_string(cli->io, "", 0, err);  /* quota_key */
-                if (rc != CHC_OK) return rc;
-            }
+            rc = chc__write_string(cli->io, "", 0, err);  /* quota_key */
+            if (rc != CHC_OK) return rc;
             rc = chc_client_send_ping(cli, err);
             if (rc != CHC_OK) return rc;
             c->hs_phase = CHC__HS_RECV_PONG;

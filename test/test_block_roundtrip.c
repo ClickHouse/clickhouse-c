@@ -512,8 +512,8 @@ test_write_lc_nullable_string(void)
         "2\t2");
 }
 
-/* SerializationObject.cpp uses 8-byte LE version=1 prefix to select JSON
- * STRING mode. Output may normalize {"a":1} to {"a":"1"} */
+/* JSON string mode is selected by an 8-byte LE version=1 prefix on the
+ * stream. Output may normalize {"a":1} to {"a":"1"} */
 static void
 test_write_json_string(void)
 {

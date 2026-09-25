@@ -32,7 +32,7 @@ static const char *current_test = "";
 #include "test_block_compare.h"
 #include "test_golden_blocks.h"
 
-#define TEST_REVISION CHC_CLIENT_DEFAULT_REVISION
+#define TEST_REVISION CHC_CLIENT_REVISION
 #define BIG_ROWS 30000   /* > CHC_COMPRESS_MAX_CHUNK raw => multi-frame */
 #define MED_ROWS 5000    /* second multi-frame block, back-to-back */
 #define N_DATA   2
@@ -90,7 +90,6 @@ decode_subject(const uint8_t *bytes, size_t len, size_t chunk,
     c.al = al;
     c.compression = CHC_COMP_LZ4;
     c.codec = codec;
-    c.client_revision = TEST_REVISION;
     c.server.revision = TEST_REVISION;
     if (chc_in_init_ioless(&c.in, al)) return -1;
 
@@ -159,7 +158,6 @@ decode_subject(const uint8_t *bytes, size_t len, size_t chunk,
     c.io = &io;
     c.compression = CHC_COMP_LZ4;
     c.codec = codec;
-    c.client_revision = TEST_REVISION;
     c.server.revision = TEST_REVISION;
     if (chc_in_init(&c.in, &io, al, 0, err)) return -1;
 

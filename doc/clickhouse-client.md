@@ -4,6 +4,11 @@ TCP packet loop over `chc_io`. Hello / Query / Data / EOS / Exception /
 Progress / Pong, including compression negotiation. Depends on
 [clickhouse.h](clickhouse.md) and [clickhouse-compression.h](clickhouse-compression.md).
 
+Packet bodies & revision gates follow the [Native Protocol
+spec](https://clickhouse.com/docs/reference/interfaces/specs/NativeProtocol);
+the bytes inside Data packets follow the [Native Format
+spec](https://clickhouse.com/docs/reference/interfaces/specs/NativeFormat).
+
 One `chc_client` wraps one connection. No reconnect, endpoint failover, or
 DNS — caller-side concerns. Caller owns the `chc_io` (socket setup, TLS,
 timeouts, cancel polling).
@@ -11,14 +16,14 @@ timeouts, cancel polling).
 ## Opts & handshake
 
 ```c
-#define CHC_CLIENT_DEFAULT_REVISION 54459u
+#define CHC_SERVER_MIN_REVISION 54462u  /* ClickHouse 23.3 */
+#define CHC_CLIENT_REVISION     54465u  /* SPARSE_SERIALIZATION */
 
 typedef struct chc_client_opts {
     const char *client_name;        /* default "clickhouse-c" */
     uint64_t client_version_major;
     uint64_t client_version_minor;
     uint64_t client_version_patch;
-    uint64_t client_revision;       /* default CHC_CLIENT_DEFAULT_REVISION */
 
     const char *database;           /* default "default" */
     const char *user;               /* default "default" */
@@ -32,12 +37,12 @@ typedef struct chc_client_opts {
 
 typedef struct chc_server_info {
     char     name[64];
-    char     timezone[64];
+    char     timezone[64];          /* updated by CHC_PKT_TIMEZONE_UPDATE */
     char     display_name[128];
     uint64_t version_major;
     uint64_t version_minor;
     uint64_t version_patch;
-    uint64_t revision;              /* min(client_revision, server_revision) */
+    uint64_t revision;              /* min(CHC_CLIENT_REVISION, server revision) */
 } chc_server_info;
 
 typedef struct chc_client chc_client;
@@ -52,8 +57,16 @@ const chc_server_info *chc_client_server_info(const chc_client *c);
 `chc_client_init` runs Hello / HelloAck synchronously. On failure the
 caller may still pass the returned (NULL-on-fail) handle to
 `chc_client_close`. The effective revision (min of client & server) is
-exposed via `chc_client_server_info` and used to gate optional fields on
-every later packet.
+exposed via `chc_client_server_info`.
+
+ClickHouse 23.3 (revision 54462) is the oldest supported server. Hello from
+an older server fails with `CHC_ERR_PROTOCOL`. Client always advertises
+`CHC_CLIENT_REVISION` (54465, `SPARSE_SERIALIZATION`). Every field below
+54462 is therefore always present; only Progress `total_bytes`
+(`TOTAL_BYTES_IN_PROGRESS`, 54463) depends on the negotiated revision. Hello strings longer than 4096 bytes or more than 256
+password rules fail with `CHC_ERR_PROTOCOL`; server strings longer than the
+`chc_server_info` buffers are truncated. Password rules & nonce are read and
+discarded.
 
 `chc_client_init` returns `CHC_ERR_SERVER` when server rejects handshake. If
 `exc` is not NULL, caller owns `*exc` and frees it with
@@ -103,14 +116,15 @@ typedef enum chc_packet_kind {
     CHC_PKT_LOG             = 10,
     CHC_PKT_TABLE_COLUMNS   = 11,
     CHC_PKT_PROFILE_EVENTS  = 14,
+    CHC_PKT_TIMEZONE_UPDATE = 17,
 } chc_packet_kind;
 
 typedef struct chc_packet {
     chc_packet_kind kind;
     chc_block      *block;        /* DATA / TOTALS / EXTREMES / LOG / PROFILE_EVENTS */
     chc_exception  *exception;    /* EXCEPTION */
-    struct { uint64_t rows, bytes, total_rows,
-                      written_rows, written_bytes; } progress;
+    struct { uint64_t rows, bytes, total_rows, total_bytes,
+                      written_rows, written_bytes, elapsed_ns; } progress;
     struct { uint64_t rows, blocks, bytes, rows_before_limit;
              uint8_t  applied_limit, calculated_rows_before_limit; } profile;
 } chc_packet;
@@ -122,7 +136,9 @@ void chc_packet_clear      (chc_client *c, chc_packet *p);
 Exceptions arrive as `CHC_PKT_EXCEPTION` packets — `recv_packet` returns
 `CHC_OK`, not `CHC_ERR_SERVER`. Only transport-level failures return
 non-OK. `TABLE_COLUMNS` body is consumed & discarded (no caller-visible
-fields).
+fields). `TIMEZONE_UPDATE` carries no payload: it replaces
+`chc_server_info.timezone` with the query's `session_timezone`, empty
+meaning server default, and leaves it untouched when incomplete.
 
 `chc_packet_clear` frees the `block` & `exception`. NULLing them on
 the packet before calling transfers ownership to the caller.
@@ -139,9 +155,19 @@ struct chc_exception {
 void chc_exception_free(chc_exception *e, const chc_alloc *al);
 ```
 
-`written_rows` / `written_bytes` are zero pre-revision 54420.
-`total_rows` is zero pre-51554. Library reads these fields when the
-negotiated revision exposes them, leaving zeros otherwise.
+`total_bytes` is zero below negotiated revision 54463.
+
+## Sparse columns
+
+Servers before 23.8 send sparse columns at every supported revision, 23.8
+and newer only at 54465. Reader decodes them into ordinary dense layouts: fixed width
+types and `String`, standalone or as `Tuple`/`Point` elements. Rows omitted
+by sparse encoding hold zero bytes or empty strings, the storage default,
+even for `Enum` whose type default is its first value. Other serialization
+kinds and sparse `Nullable`/`Array`/`Map`/`LowCardinality` roots fail with
+`CHC_ERR_PROTOCOL`; servers send none of these below revision 54483.
+Decoded columns can be passed straight to `chc_client_send_data`, which
+always writes dense bodies.
 
 ## Threading
 
