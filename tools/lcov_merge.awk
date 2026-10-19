@@ -7,8 +7,9 @@ BEGIN { CONVFMT = OFMT = "%.0f" }
 /^DA:/   { i=index(c=substr($0,4),","); ln=substr(c,1,i-1)
            if(!((sf,ln) in da)) lord[sf,++nl[sf]]=ln
            da[sf,ln]+=substr(c,i+1); next }
-/^FN:/   { i=index(c=substr($0,4),","); nm=substr(c,i+1)
-           if(!((sf,nm) in fnln)){fnln[sf,nm]=substr(c,1,i-1); fnord[sf,++nf[sf]]=nm} next }
+# FN is line,name in lcov 1 and line,end,name in lcov 2
+/^FN:/   { c=substr($0,4); match(c,/^[0-9]+(,[0-9]+)?,/); nm=substr(c,RLENGTH+1)
+           if(!((sf,nm) in fnln)){fnln[sf,nm]=substr(c,1,RLENGTH-1); fnord[sf,++nf[sf]]=nm} next }
 /^FNDA:/ { i=index(c=substr($0,6),","); fnda[sf,substr(c,i+1)]+=substr(c,1,i-1); next }
 END{
  for(s=1;s<=ns;s++){
