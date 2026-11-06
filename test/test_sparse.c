@@ -120,7 +120,7 @@ decode_compressed(const wbuf *body, size_t frame, chc_block **out, chc_err *err)
     if (rc == CHC_OK) rc = chc__write_string(&pkt_io, "", 0, err);
     for (size_t off = 0; rc == CHC_OK && off < body->n; off += frame) {
         size_t n = body->n - off < frame ? body->n - off : frame;
-        rc = chc__comp_emit_chunks(&pkt_io, &codec, CHC_COMP_LZ4, body->d + off, n, &al, err);
+        rc = test_comp_emit_chunks(&pkt_io, &codec, CHC_COMP_LZ4, body->d + off, n, &al, err);
     }
     chc_client c;
     memset(&c, 0, sizeof c);

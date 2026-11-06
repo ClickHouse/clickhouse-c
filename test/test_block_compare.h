@@ -34,7 +34,7 @@ test_type_eq(const chc_type *a, const chc_type *b)
     return eq;
 }
 
-CHC_MAYBE_UNUSED static int
+static int
 test_col_eq(const chc_column *a, const chc_column *b)
 {
     if (!a || !b) return a == b;

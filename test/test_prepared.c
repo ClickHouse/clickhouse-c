@@ -2,7 +2,8 @@
  * test_prepared.c -- prepared Data blocks, no server. A prepared block sent on
  * a connection writes the same bytes chc_client_send_data writes for that
  * block, in every compression mode, and a connection negotiated differently
- * refuses it without writing.
+ * refuses it without writing. Frames stream while a body serializes, matching
+ * frames cut from the whole body.
  */
 
 #include <stdint.h>
@@ -173,11 +174,58 @@ out:
     test_mem_sink_free(&prepared);
 }
 
+static void
+test_frame_sink_matches_chunks(void)
+{
+    current_test = "frame_sink_matches_chunks";
+    chc_alloc al = chc_alloc_stdlib();
+    chc_err err = {};
+    chc_codec codec = {};
+    chc_lz4_codec_init(&codec);
+    chc_zstd_codec_init(&codec);
+    static uint8_t body[3 * CHC_COMPRESS_MAX_CHUNK + 1234];
+    for (size_t i = 0; i < sizeof body; i++) body[i] = (uint8_t) (i * 31 / 7);
+    /* Pieces below, across and above one frame, and an exact frame end */
+    size_t sizes[] = { 1, 7, CHC_COMPRESS_MAX_CHUNK - 8, CHC_COMPRESS_MAX_CHUNK + 5,
+                       2 * CHC_COMPRESS_MAX_CHUNK, CHC_COMPRESS_MAX_CHUNK };
+    chc_compression modes[] = { CHC_COMP_LZ4, CHC_COMP_ZSTD };
+    for (size_t m = 0; m < 2; m++) {
+        for (size_t lens = 0; lens < 3; lens++) {
+            size_t len = lens == 0 ? sizeof body
+                       : lens == 1 ? 2 * CHC_COMPRESS_MAX_CHUNK : 10;
+            test_mem_sink whole, streamed;
+            chc_io whole_io, streamed_io;
+            test_mem_sink_init(&whole, &whole_io);
+            test_mem_sink_init(&streamed, &streamed_io);
+            CHECK_OK(test_comp_emit_chunks(&whole_io, &codec, modes[m], body, len,
+                                           &al, &err), err);
+            chc__frame_sink fs;
+            chc_io fs_io;
+            int rc = chc__frame_sink_init(&fs, &fs_io, &streamed_io, &codec, modes[m],
+                                          &al, &err);
+            for (size_t at = 0, k = 0; rc == CHC_OK && at < len; k++) {
+                size_t n = sizes[k % 6];
+                if (n > len - at) n = len - at;
+                rc = fs_io.write(fs_io.ud, body + at, n, &err);
+                at += n;
+            }
+            CHECK_OK(chc__frame_sink_finish(&fs, rc, &err), err);
+            CHECK_EQ_U64(fs.total, len);
+            CHECK_EQ_U64(streamed.len, whole.len);
+            CHECK(memcmp(streamed.data, whole.data, whole.len) == 0);
+        out:
+            test_mem_sink_free(&whole);
+            test_mem_sink_free(&streamed);
+        }
+    }
+}
+
 int
 main(void)
 {
     test_matches_send_data();
     test_empty_and_errors();
+    test_frame_sink_matches_chunks();
 
     if (fail_count) {
         fprintf(stderr, "%d failure(s)\n", fail_count);

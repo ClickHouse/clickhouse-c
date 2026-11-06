@@ -48,7 +48,7 @@ test_clickhouse_connect(uint16_t port)
     return -1;
 }
 
-CHC_MAYBE_UNUSED static int
+static int
 test_write_if_absent(const char *path, const char *body)
 {
     struct stat st;
@@ -59,14 +59,14 @@ test_write_if_absent(const char *path, const char *body)
     return fclose(f);
 }
 
-CHC_MAYBE_UNUSED static int
+static int
 test_join_path(char *buf, size_t len, const char *root, const char *name)
 {
     int n = snprintf(buf, len, "%s/%s", root, name);
     return n > 0 && (size_t) n < len ? 0 : -1;
 }
 
-CHC_MAYBE_UNUSED static int
+static int
 test_mkdir_child(const char *root, const char *name)
 {
     char path[512];
@@ -75,7 +75,7 @@ test_mkdir_child(const char *root, const char *name)
     return 0;
 }
 
-CHC_MAYBE_UNUSED static int
+static int
 test_clickhouse_wait_port(uint16_t port)
 {
     for (int i = 0; i < 60; i++) {
@@ -95,7 +95,7 @@ test_clickhouse_wait_port(uint16_t port)
     return -1;
 }
 
-CHC_MAYBE_UNUSED static void
+static void
 test_clickhouse_server_stop(pid_t *pid)
 {
     if (!pid || *pid <= 0) return;

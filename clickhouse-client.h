@@ -569,15 +569,12 @@ chc__client_write_data(chc_client *c, const chc_block_builder *bb, chc_err *err)
         return chc__err_set(err, CHC_ERR_USAGE,
                             "compression enabled but codec is NULL");
 
-    chc__mem_sink ms;
-    chc_io sink_io;
-    chc__mem_sink_init(&ms, &sink_io, c->al);
-    rc = chc__client_write_block_body(&sink_io, bb, err);
-    if (rc != CHC_OK) { chc__mem_sink_free(&ms); return rc; }
-    rc = chc__comp_emit_chunks(c->io, c->codec, c->compression,
-                               ms.buf, ms.len, c->al, err);
-    chc__mem_sink_free(&ms);
-    return rc;
+    chc__frame_sink fs;
+    chc_io frames_io;
+    rc = chc__frame_sink_init(&fs, &frames_io, c->io, c->codec, c->compression,
+                              c->al, err);
+    if (rc == CHC_OK) rc = chc__client_write_block_body(&frames_io, bb, err);
+    return chc__frame_sink_finish(&fs, rc, err);
 }
 
 int
@@ -599,29 +596,26 @@ chc_block_prepare(const chc_block_builder *bb, chc_compression compression,
         return chc__err_set(err, CHC_ERR_USAGE,
                             "compression enabled but codec is NULL");
 
-    chc__mem_sink body;
-    chc_io body_io;
-    chc__mem_sink_init(&body, &body_io, al);
-    int rc = chc__client_write_block_body(&body_io, bb, err);
-    if (rc != CHC_OK) { chc__mem_sink_free(&body); return rc; }
-    out->raw_len = body.len;
+    chc__mem_sink sink;
+    chc_io sink_io;
+    chc__mem_sink_init(&sink, &sink_io, al);
+    int rc;
     if (compression == CHC_COMP_NONE) {
-        out->bytes = body.buf;
-        out->len   = body.len;
-        out->cap   = body.cap;
-        return CHC_OK;
+        rc = chc__client_write_block_body(&sink_io, bb, err);
+        out->raw_len = sink.len;
+    } else {
+        chc__frame_sink fs;
+        chc_io frames_io;
+        rc = chc__frame_sink_init(&fs, &frames_io, &sink_io, codec, compression,
+                                  al, err);
+        if (rc == CHC_OK) rc = chc__client_write_block_body(&frames_io, bb, err);
+        rc = chc__frame_sink_finish(&fs, rc, err);
+        out->raw_len = fs.total;
     }
-
-    chc__mem_sink frames;
-    chc_io frames_io;
-    chc__mem_sink_init(&frames, &frames_io, al);
-    rc = chc__comp_emit_chunks(&frames_io, codec, compression,
-                               body.buf, body.len, al, err);
-    chc__mem_sink_free(&body);
-    if (rc != CHC_OK) { chc__mem_sink_free(&frames); return rc; }
-    out->bytes = frames.buf;
-    out->len   = frames.len;
-    out->cap   = frames.cap;
+    if (rc != CHC_OK) { chc__mem_sink_free(&sink); return rc; }
+    out->bytes = sink.buf;
+    out->len   = sink.len;
+    out->cap   = sink.cap;
     return CHC_OK;
 }
 

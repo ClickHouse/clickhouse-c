@@ -304,7 +304,7 @@ compress_packet(const chc_alloc *al, const uint8_t *body, size_t body_len,
     test_mem_sink_init(&packet, &packet_io);
     if (chc__write_varuint(&packet_io, CHC_PKT_DATA, &err)
         || chc__write_string(&packet_io, "", 0, &err)
-        || chc__comp_emit_chunks(&packet_io, &codec, CHC_COMP_LZ4,
+        || test_comp_emit_chunks(&packet_io, &codec, CHC_COMP_LZ4,
                                  body, body_len, al, &err)) {
         test_mem_sink_free(&packet);
         return 0;

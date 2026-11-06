@@ -841,7 +841,7 @@ chc_in_free(chc_in *in)
 
 /* Mark read cursor for rewind. Ioless mode checkpoints at packet boundaries,
  * allowing mid-parse CHC_WOULD_BLOCK to rewind & retry after more bytes arrive */
-CHC_MAYBE_UNUSED static void
+static void
 chc__in_checkpoint(chc_in *in)
 {
     in->mark = in->pos;
@@ -850,7 +850,7 @@ chc__in_checkpoint(chc_in *in)
 /* Restore the cursor to the last checkpoint, un-counting bytes consumed
  * since it (so consumed stays equal to an io-backed read of the same
  * stream). Clears the mark. */
-CHC_MAYBE_UNUSED static int
+static int
 chc__in_rewind(chc_in *in)
 {
     if (in->mark == SIZE_MAX)
