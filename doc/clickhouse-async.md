@@ -71,6 +71,8 @@ int  chc_async_send_query   (chc_async_client *c,
 int  chc_async_send_data    (chc_async_client *c, const chc_block_builder *bb,
                              chc_err *err);
 int  chc_async_send_data_end(chc_async_client *c, chc_err *err);
+int  chc_async_send_prepared(chc_async_client *c, const chc_prepared_block *pb,
+                             chc_err *err);
 int  chc_async_recv_packet  (chc_async_client *c, chc_packet *out, chc_err *err);
 void chc_async_packet_clear (chc_async_client *c, chc_packet *p);
 ```
@@ -90,7 +92,8 @@ granularity: at most one frame is re-decompressed and one column re-parsed.
   `*exc` unchanged.
 * `send_query` / `send_data` only append to the out buffer; they never block.
   `send_data(bb)` appends a Data block; `send_data_end` appends the empty
-  terminating block that ends an INSERT stream. Semantics mirror
+  terminating block that ends an INSERT stream; `send_prepared` appends a
+  [prepared block](clickhouse-client.md#prepared-blocks). Semantics mirror
   [the blocking client](clickhouse-client.md#send).
 * `recv_packet` decodes one packet. Server exceptions arrive as
   `CHC_PKT_EXCEPTION` with `CHC_OK` (not `CHC_ERR_SERVER`); only transport-level
