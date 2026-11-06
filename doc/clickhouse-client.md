@@ -101,6 +101,40 @@ empty; OpenTelemetry context is empty; quota key is empty.
 stream, or acts as the query-text terminator (internally used by
 `send_query`).
 
+## Prepared blocks
+
+```c
+typedef struct chc_prepared_block {
+    chc_compression compression;
+    uint64_t        n_rows;
+    size_t          raw_len;   /* serialized body bytes before compression */
+    uint8_t        *bytes;
+    size_t          len;
+    size_t          cap;
+} chc_prepared_block;
+
+int  chc_block_prepare(const chc_block_builder *bb, chc_compression compression,
+                       const chc_codec *codec, const chc_alloc *al,
+                       chc_prepared_block *out, chc_err *err);
+void chc_prepared_block_free(chc_prepared_block *pb, const chc_alloc *al);
+int  chc_client_send_prepared(chc_client *c, const chc_prepared_block *pb,
+                              chc_err *err);
+```
+
+`chc_block_prepare` encodes a block once for repeated sends. It produces same
+block bytes as `send_data`, including compression unless `compression` is
+`CHC_COMP_NONE`. Source column buffers may be freed once preparation returns.
+Pass NULL for `bb` to prepare an empty block that ends an INSERT stream.
+Compression without a codec returns `CHC_ERR_USAGE` and leaves `out->bytes`
+NULL. Free a prepared block with same allocator used to prepare it. Free any
+existing prepared block before reusing `out`.
+
+`chc_client_send_prepared` sends stored bytes with a Data packet header. Reuse
+a prepared block after reconnecting if compression still matches. A mismatch
+returns `CHC_ERR_USAGE` without writing; prepare another block with matching
+compression. All supported protocol revisions accept prepared blocks. Send
+query packets and settings separately when starting another INSERT.
+
 ## Receive
 
 ```c

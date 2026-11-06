@@ -61,6 +61,8 @@ int  chc_async_send_query(chc_async_client *c, const char *sql, size_t sql_len,
 int  chc_async_send_data(chc_async_client *c, const chc_block_builder *bb,
                          chc_err *err);
 int  chc_async_send_data_end(chc_async_client *c, chc_err *err);
+int  chc_async_send_prepared(chc_async_client *c, const chc_prepared_block *pb,
+                             chc_err *err);
 int  chc_async_recv_packet(chc_async_client *c, chc_packet *out, chc_err *err);
 const chc_server_info *chc_async_server_info(const chc_async_client *c);
 
@@ -265,6 +267,13 @@ int
 chc_async_send_data_end(chc_async_client *c, chc_err *err)
 {
     return chc_client_send_data(&c->cli, NULL, err);
+}
+
+int
+chc_async_send_prepared(chc_async_client *c, const chc_prepared_block *pb,
+                        chc_err *err)
+{
+    return chc_client_send_prepared(&c->cli, pb, err);
 }
 
 const chc_server_info *

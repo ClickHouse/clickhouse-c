@@ -195,6 +195,26 @@ void chc_packet_clear(chc_client *c, chc_packet *p);
 int  chc_client_send_data(chc_client *c, const chc_block_builder *bb,
                           chc_err *err);
 
+/* Own encoded block bytes for reuse on connections with matching compression. */
+typedef struct chc_prepared_block {
+    chc_compression compression;
+    uint64_t        n_rows;
+    size_t          raw_len;   /* serialized body bytes before compression */
+    uint8_t        *bytes;
+    size_t          len;
+    size_t          cap;
+} chc_prepared_block;
+
+/* Free any existing prepared block before reusing `out`. */
+int  chc_block_prepare(const chc_block_builder *bb, chc_compression compression,
+                       const chc_codec *codec, const chc_alloc *al,
+                       chc_prepared_block *out, chc_err *err);
+void chc_prepared_block_free(chc_prepared_block *pb, const chc_alloc *al);
+
+/* Send stored block bytes. Reject mismatched compression before writing. */
+int  chc_client_send_prepared(chc_client *c, const chc_prepared_block *pb,
+                              chc_err *err);
+
 int  chc_client_send_cancel(chc_client *c, chc_err *err);
 int  chc_client_send_ping(chc_client *c, chc_err *err);
 
@@ -564,6 +584,67 @@ int
 chc_client_send_data(chc_client *c, const chc_block_builder *bb, chc_err *err)
 {
     return chc__client_write_data(c, bb, err);
+}
+
+int
+chc_block_prepare(const chc_block_builder *bb, chc_compression compression,
+                  const chc_codec *codec, const chc_alloc *al,
+                  chc_prepared_block *out, chc_err *err)
+{
+    *out = (chc_prepared_block) {
+        .compression = compression,
+        .n_rows      = bb ? bb->n_rows : 0,
+    };
+    if (compression != CHC_COMP_NONE && !codec)
+        return chc__err_set(err, CHC_ERR_USAGE,
+                            "compression enabled but codec is NULL");
+
+    chc__mem_sink body;
+    chc_io body_io;
+    chc__mem_sink_init(&body, &body_io, al);
+    int rc = chc__client_write_block_body(&body_io, bb, err);
+    if (rc != CHC_OK) { chc__mem_sink_free(&body); return rc; }
+    out->raw_len = body.len;
+    if (compression == CHC_COMP_NONE) {
+        out->bytes = body.buf;
+        out->len   = body.len;
+        out->cap   = body.cap;
+        return CHC_OK;
+    }
+
+    chc__mem_sink frames;
+    chc_io frames_io;
+    chc__mem_sink_init(&frames, &frames_io, al);
+    rc = chc__comp_emit_chunks(&frames_io, codec, compression,
+                               body.buf, body.len, al, err);
+    chc__mem_sink_free(&body);
+    if (rc != CHC_OK) { chc__mem_sink_free(&frames); return rc; }
+    out->bytes = frames.buf;
+    out->len   = frames.len;
+    out->cap   = frames.cap;
+    return CHC_OK;
+}
+
+void
+chc_prepared_block_free(chc_prepared_block *pb, const chc_alloc *al)
+{
+    if (!pb) return;
+    if (pb->bytes) al->free(al->ud, pb->bytes, pb->cap);
+    pb->bytes = NULL;
+    pb->len = pb->cap = 0;
+}
+
+int
+chc_client_send_prepared(chc_client *c, const chc_prepared_block *pb,
+                         chc_err *err)
+{
+    if (pb->compression != c->compression)
+        return chc__err_set(err, CHC_ERR_USAGE,
+                            "prepared block compression differs from connection");
+    int rc;
+    if ((rc = chc__write_varuint(c->io, CHC__CLIENT_DATA, err))) return rc;
+    if ((rc = chc__write_string(c->io, "", 0, err))) return rc;
+    return chc__write_bytes(c->io, pb->bytes, pb->len, err);
 }
 
 int
