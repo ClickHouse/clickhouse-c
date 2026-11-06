@@ -375,23 +375,71 @@ chc__mem_sink_free(chc__mem_sink *s)
     s->cap = s->len = 0;
 }
 
-/* Emit a buffered block as one or more compressed frames to io. */
+/* chc_io compressing every CHC_COMPRESS_MAX_CHUNK bytes written into one
+ * frame on `out`, so a body never sits uncompressed whole. */
+typedef struct chc__frame_sink {
+    chc_io          *out;
+    const chc_codec *codec;
+    chc_compression  m;
+    const chc_alloc *al;
+    uint8_t         *buf;
+    size_t           len;
+    size_t           total;
+} chc__frame_sink;
+
 static int
-chc__comp_emit_chunks(chc_io *io, const chc_codec *codec, chc_compression m,
-                      const void *src, size_t src_len,
-                      const chc_alloc *al, chc_err *err)
+chc__frame_sink_write(void *ud, const void *p, size_t n, chc_err *err)
 {
-    const uint8_t *p = src;
-    size_t left = src_len;
-    while (left) {
-        size_t take = left > CHC_COMPRESS_MAX_CHUNK
-                          ? CHC_COMPRESS_MAX_CHUNK : left;
-        int rc = chc__comp_emit_frame(io, codec, m, p, take, al, err);
-        if (rc != CHC_OK) return rc;
-        p    += take;
-        left -= take;
+    chc__frame_sink *s = ud;
+    const uint8_t *src = p;
+    s->total += n;
+    while (n) {
+        if (!s->len && n >= CHC_COMPRESS_MAX_CHUNK) {
+            int rc = chc__comp_emit_frame(s->out, s->codec, s->m, src,
+                                          CHC_COMPRESS_MAX_CHUNK, s->al, err);
+            if (rc != CHC_OK) return rc;
+            src += CHC_COMPRESS_MAX_CHUNK;
+            n   -= CHC_COMPRESS_MAX_CHUNK;
+            continue;
+        }
+        size_t take = CHC_COMPRESS_MAX_CHUNK - s->len;
+        if (take > n) take = n;
+        memcpy(s->buf + s->len, src, take);
+        s->len += take;
+        src    += take;
+        n      -= take;
+        if (s->len == CHC_COMPRESS_MAX_CHUNK) {
+            s->len = 0;
+            int rc = chc__comp_emit_frame(s->out, s->codec, s->m, s->buf,
+                                          CHC_COMPRESS_MAX_CHUNK, s->al, err);
+            if (rc != CHC_OK) return rc;
+        }
     }
     return CHC_OK;
+}
+
+CHC_MAYBE_UNUSED static int
+chc__frame_sink_init(chc__frame_sink *s, chc_io *io, chc_io *out,
+                     const chc_codec *codec, chc_compression m,
+                     const chc_alloc *al, chc_err *err)
+{
+    *s = (chc__frame_sink) { .out = out, .codec = codec, .m = m, .al = al };
+    *io = (chc_io) { .ud = s, .write = chc__frame_sink_write };
+    s->buf = chc__alloc(al, CHC_COMPRESS_MAX_CHUNK, err);
+    return s->buf ? CHC_OK : CHC_ERR_OOM;
+}
+
+/* Emit the partial last frame and release the staging buffer */
+CHC_MAYBE_UNUSED static int
+chc__frame_sink_finish(chc__frame_sink *s, int rc, chc_err *err)
+{
+    if (rc == CHC_OK && s->len)
+        rc = chc__comp_emit_frame(s->out, s->codec, s->m, s->buf, s->len,
+                                  s->al, err);
+    if (s->buf) s->al->free(s->al->ud, s->buf, CHC_COMPRESS_MAX_CHUNK);
+    s->buf = NULL;
+    s->len = 0;
+    return rc;
 }
 
 /* ---------- decompression side ---------- */

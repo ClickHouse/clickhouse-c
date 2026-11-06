@@ -13,7 +13,7 @@
 
 #define TEST_GOLDEN_BLOCKS 3
 
-CHC_MAYBE_UNUSED static int
+static int
 test_write_uint_string_block(chc_io *io, const chc_alloc *al,
                              const chc_block_opts *opts, int n_rows,
                              chc_err *err)
@@ -51,7 +51,7 @@ done:
     return rc;
 }
 
-CHC_MAYBE_UNUSED static int
+static int
 test_write_nullable_array_block(chc_io *io, const chc_alloc *al,
                                 const chc_block_opts *opts, chc_err *err)
 {
@@ -81,7 +81,7 @@ done:
     return rc;
 }
 
-CHC_MAYBE_UNUSED static int
+static int
 test_write_lc_string_block(chc_io *io, const chc_alloc *al,
                            const chc_block_opts *opts, chc_err *err)
 {
@@ -165,7 +165,7 @@ test_write_compressed_packet(chc_io *io, const chc_alloc *al,
     test_mem_sink_init(&raw, &raw_io);
     rc = test_write_uint_string_block(&raw_io, al, opts, n_rows, err);
     if (!rc)
-        rc = chc__comp_emit_chunks(io, codec, CHC_COMP_LZ4,
+        rc = test_comp_emit_chunks(io, codec, CHC_COMP_LZ4,
                                    raw.data, raw.len, al, err);
     test_mem_sink_free(&raw);
     return rc;

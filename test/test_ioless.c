@@ -296,7 +296,7 @@ build_compressed_block(const chc_alloc *al, const chc_block_opts *opts,
     test_mem_sink comp;
     chc_io cio;
     test_mem_sink_init(&comp, &cio);
-    if (chc__comp_emit_chunks(&cio, codec, CHC_COMP_LZ4, raw.data, raw.len, al, &err)) {
+    if (test_comp_emit_chunks(&cio, codec, CHC_COMP_LZ4, raw.data, raw.len, al, &err)) {
         fprintf(stderr, "build_compressed_block: compress: %s\n", err.msg);
         test_mem_sink_free(&raw); test_mem_sink_free(&comp); return NULL;
     }

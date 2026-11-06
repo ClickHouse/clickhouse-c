@@ -138,13 +138,13 @@ test_emit_frame(void)
      * frame the codec refuses. */
     static uint8_t bulk[CHC_COMPRESS_MAX_CHUNK + 1024];
     test_mem_sink_init(&sink, &io);
-    CHECK(chc__comp_emit_chunks(&io, &lz4, CHC_COMP_LZ4, bulk, sizeof bulk,
+    CHECK(test_comp_emit_chunks(&io, &lz4, CHC_COMP_LZ4, bulk, sizeof bulk,
                                 &al, &err) == CHC_OK);
     CHECK(sink.len > 0);
     test_mem_sink_free(&sink);
 
     test_mem_sink_init(&sink, &io);
-    CHECK(chc__comp_emit_chunks(&io, &lz4, CHC_COMP_NONE, bulk, sizeof bulk,
+    CHECK(test_comp_emit_chunks(&io, &lz4, CHC_COMP_NONE, bulk, sizeof bulk,
                                 &al, &err) == CHC_ERR_USAGE);
     test_mem_sink_free(&sink);
 

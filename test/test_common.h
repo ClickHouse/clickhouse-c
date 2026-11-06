@@ -77,14 +77,14 @@ typedef struct test_mem_sink {
     size_t cap;
 } test_mem_sink;
 
-CHC_MAYBE_UNUSED static int
+static int
 test_mem_err_set(chc_err *err, int code, const char *msg)
 {
     if (err) snprintf(err->msg, sizeof err->msg, "%s", msg);
     return code;
 }
 
-CHC_MAYBE_UNUSED static int
+static int
 test_mem_read(void *ud, void *buf, size_t len, size_t *out_n, chc_err *err)
 {
     (void) err;
@@ -118,7 +118,7 @@ test_block_read_io(chc_io *io, const chc_alloc *al, const chc_block_opts *opts,
     return rc;
 }
 
-CHC_MAYBE_UNUSED static int
+static int
 test_mem_sink_write(void *ud, const void *buf, size_t n, chc_err *err)
 {
     test_mem_sink *s = ud;
@@ -156,6 +156,26 @@ test_mem_sink_free(test_mem_sink *sink)
     *sink = (test_mem_sink) {};
 }
 
+#ifdef CLICKHOUSE_COMPRESSION_H
+CHC_MAYBE_UNUSED static int
+test_comp_emit_chunks(chc_io *io, const chc_codec *codec, chc_compression m,
+                      const void *src, size_t src_len,
+                      const chc_alloc *al, chc_err *err)
+{
+    const uint8_t *p = src;
+    size_t left = src_len;
+    while (left) {
+        size_t take = left > CHC_COMPRESS_MAX_CHUNK
+                          ? CHC_COMPRESS_MAX_CHUNK : left;
+        int rc = chc__comp_emit_frame(io, codec, m, p, take, al, err);
+        if (rc != CHC_OK) return rc;
+        p    += take;
+        left -= take;
+    }
+    return CHC_OK;
+}
+#endif
+
 /* Allocator that fails the nth request, counting alloc & realloc. Drives
  * OOM sweeps: run an operation once per n and assert every partial unwind
  * returns the allocator to zero live bytes. */
@@ -166,7 +186,7 @@ typedef struct test_fail_alloc {
     size_t live_bytes;
 } test_fail_alloc;
 
-CHC_MAYBE_UNUSED static void *
+static void *
 test_fail_alloc_alloc(void *ud, size_t n)
 {
     test_fail_alloc *a = ud;
@@ -176,7 +196,7 @@ test_fail_alloc_alloc(void *ud, size_t n)
     return p;
 }
 
-CHC_MAYBE_UNUSED static void *
+static void *
 test_fail_alloc_realloc(void *ud, void *p, size_t old_n, size_t new_n)
 {
     test_fail_alloc *a = ud;
@@ -188,7 +208,7 @@ test_fail_alloc_realloc(void *ud, void *p, size_t old_n, size_t new_n)
     return q;
 }
 
-CHC_MAYBE_UNUSED static void
+static void
 test_fail_alloc_free(void *ud, void *p, size_t n)
 {
     test_fail_alloc *a = ud;
