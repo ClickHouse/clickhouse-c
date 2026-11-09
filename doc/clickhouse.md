@@ -310,6 +310,9 @@ bool    chc_block_is_overflows (const chc_block *b);
 int32_t chc_block_bucket_num   (const chc_block *b);
 ```
 
+`chc_block_bucket_num` is -1 unless block is a two-level aggregation bucket,
+including blocks read without BlockInfo.
+
 Clean EOF at a block boundary returns `CHC_OK` with `*out == NULL`. Any
 short read mid-block is `CHC_ERR_EOF`. The TCP packet loop in
 [clickhouse-client.md](clickhouse-client.md) drives this with the right
