@@ -508,6 +508,49 @@ out:
     chc_async_client_free(c);
 }
 
+/* send_query_ex queues same Query packet as blocking client, settings and
+ * all */
+static void
+test_send_query_ex(void)
+{
+    current_test = "send_query_ex";
+    chc_alloc al = test_make_alloc();
+    chc_err err = {};
+    chc_async_client *c = NULL;
+    chc_client_opts opts = {};
+    uint8_t *plain = NULL;
+    CHECK_OK(chc_async_client_init(&c, &opts, &al, &err), err);
+    c->cli.server.revision = TEST_REVISION;
+
+    const char *sql = "SELECT 1";
+    CHECK_OK(chc_async_send_query(c, sql, strlen(sql), "qid", 3, &err), err);
+    const uint8_t *ob; size_t plain_len;
+    chc_async_pending_out(c, &ob, &plain_len);
+    plain = malloc(plain_len);
+    CHECK(plain != NULL);
+    memcpy(plain, ob, plain_len);
+    chc_async_consume_out(c, plain_len);
+
+    chc_query_opts qopts = { .query_id = "qid", .query_id_len = 3 };
+    CHECK_OK(chc_async_send_query_ex(c, sql, strlen(sql), &qopts, &err), err);
+    size_t ol;
+    chc_async_pending_out(c, &ob, &ol);
+    CHECK_EQ_U64(ol, plain_len);
+    CHECK(memcmp(ob, plain, plain_len) == 0);
+    chc_async_consume_out(c, ol);
+
+    /* Setting entry: name, flags varuint, value */
+    chc_query_setting set = { .name = "max_threads", .value = "1" };
+    qopts.settings = &set;
+    qopts.n_settings = 1;
+    CHECK_OK(chc_async_send_query_ex(c, sql, strlen(sql), &qopts, &err), err);
+    chc_async_pending_out(c, &ob, &ol);
+    CHECK_EQ_U64(ol, plain_len + 1 + 11 + 1 + 1 + 1);
+out:
+    free(plain);
+    chc_async_client_free(c);
+}
+
 int
 main(void)
 {
@@ -515,6 +558,7 @@ main(void)
     test_handshake_chunked();
     test_handshake_exception();
     test_out_shuttle();
+    test_send_query_ex();
 
     if (fail_count) {
         fprintf(stderr, "%d check(s) failed\n", fail_count);
