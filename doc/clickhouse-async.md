@@ -68,6 +68,9 @@ int  chc_async_send_query   (chc_async_client *c,
                              const char *sql,      size_t sql_len,
                              const char *query_id, size_t query_id_len,
                              chc_err *err);
+int  chc_async_send_query_ex(chc_async_client *c,
+                             const char *sql, size_t sql_len,
+                             const chc_query_opts *opts, chc_err *err);
 int  chc_async_send_data    (chc_async_client *c, const chc_block_builder *bb,
                              chc_err *err);
 int  chc_async_send_data_end(chc_async_client *c, chc_err *err);
@@ -91,6 +94,8 @@ granularity: at most one frame is re-decompressed and one column re-parsed.
   [`chc_exception_free`](clickhouse-client.md#receive). Other results leave
   `*exc` unchanged.
 * `send_query` / `send_data` only append to the out buffer; they never block.
+  `send_query_ex` mirrors `chc_client_send_query_ex`, carrying query id,
+  settings, and parameters.
   `send_data(bb)` appends a Data block; `send_data_end` appends the empty
   terminating block that ends an INSERT stream; `send_prepared` appends a
   [prepared block](clickhouse-client.md#prepared-blocks). Semantics mirror

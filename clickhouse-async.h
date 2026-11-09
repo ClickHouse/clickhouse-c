@@ -58,6 +58,8 @@ int  chc_async_handshake(chc_async_client *c, chc_exception **exc,
                          chc_err *err);
 int  chc_async_send_query(chc_async_client *c, const char *sql, size_t sql_len,
                           const char *query_id, size_t query_id_len, chc_err *err);
+int  chc_async_send_query_ex(chc_async_client *c, const char *sql, size_t sql_len,
+                             const chc_query_opts *opts, chc_err *err);
 int  chc_async_send_data(chc_async_client *c, const chc_block_builder *bb,
                          chc_err *err);
 int  chc_async_send_data_end(chc_async_client *c, chc_err *err);
@@ -255,6 +257,13 @@ chc_async_send_query(chc_async_client *c, const char *sql, size_t sql_len,
                      const char *query_id, size_t query_id_len, chc_err *err)
 {
     return chc_client_send_query(&c->cli, sql, sql_len, query_id, query_id_len, err);
+}
+
+int
+chc_async_send_query_ex(chc_async_client *c, const char *sql, size_t sql_len,
+                        const chc_query_opts *opts, chc_err *err)
+{
+    return chc_client_send_query_ex(&c->cli, sql, sql_len, opts, err);
 }
 
 int
