@@ -2749,7 +2749,7 @@ const chc_type   *chc_block_column_type(const chc_block *b, size_t i)
 const chc_column *chc_block_column(const chc_block *b, size_t i)
     { return (b && i < b->n_columns) ? b->columns[i] : NULL; }
 bool              chc_block_is_overflows(const chc_block *b) { return b ? b->is_overflows : false; }
-int32_t           chc_block_bucket_num(const chc_block *b)   { return b ? b->bucket_num : 0; }
+int32_t           chc_block_bucket_num(const chc_block *b)   { return b ? b->bucket_num : -1; }
 
 /* Resumable block reader. Continues a (possibly partial) block parse across
  * CHC_WOULD_BLOCK without re-parsing completed columns. Owns the `in`
@@ -2786,6 +2786,7 @@ chc__block_resume_in(chc_in *in, const chc_alloc *al,
     if (b == NULL) {
         b = chc__calloc(al, sizeof *b, err);
         if (!b) return CHC_ERR_OOM;
+        b->bucket_num = -1; /* BlockInfo default, kept when frame has none */
         uint64_t consumed_before = in->consumed;
 
         /* Checkpoint packet start so a mid-header would-block rewinds here. */
