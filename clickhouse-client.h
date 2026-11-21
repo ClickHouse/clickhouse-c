@@ -402,7 +402,7 @@ chc__client_recv_hello(chc_client *c, chc_exception **exc, chc_err *err)
                             (unsigned long long) kind);
 
     /* Commit only complete Hello, async handshake retries on WOULD_BLOCK */
-    chc_server_info s = {};
+    chc_server_info s = {0};
     uint64_t n_rules, nonce;
     char rule[1];
     if ((rc = chc__read_server_string(&c->in, s.name, sizeof s.name, err)) ||
@@ -464,7 +464,7 @@ chc_client_init(chc_client **out, const chc_client_opts *opts,
                 const chc_alloc *al, chc_io *io, chc_exception **exc,
                 chc_err *err)
 {
-    chc_client_opts def_opts = {};
+    chc_client_opts def_opts = {0};
     if (!opts) opts = &def_opts;
 
     chc_client *c = chc__calloc(al, sizeof *c, err);
@@ -645,7 +645,7 @@ int
 chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
                          const chc_query_opts *opts, chc_err *err)
 {
-    chc_query_opts def = {};
+    chc_query_opts def = {0};
     if (!opts) opts = &def;
 
     int rc;
@@ -656,7 +656,7 @@ chc_client_send_query_ex(chc_client *c, const char *sql, size_t sql_len,
      * We send the minimum the server tolerates (initial fields blank,
      * iface=TCP); only client_name identifies us. */
     uint8_t query_kind = 1;       /* INITIAL_QUERY */
-    uint8_t z8[8] = {};
+    uint8_t z8[8] = {0};
     uint8_t iface_type = 1;       /* TCP */
     uint8_t no_otel = 0;
     if ((rc = chc__write_bytes (c->io, &query_kind, 1, err))) return rc;
