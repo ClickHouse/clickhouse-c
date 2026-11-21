@@ -736,7 +736,11 @@ chc_alloc chc_alloc_stdlib(void) {
 #define CHC_MAX_NUM_COLUMNS       1000000ULL
 #endif
 #ifndef CHC_MAX_NUM_ROWS
-#define CHC_MAX_NUM_ROWS          1000000000000ULL
+/* Row counts size arrays, so 32-bit targets stop at SIZE_MAX */
+#define CHC_MAX_NUM_ROWS          (SIZE_MAX < 1000000000000ULL ? SIZE_MAX : 1000000000000ULL)
+#endif
+#if CHC_MAX_NUM_ROWS > SIZE_MAX
+#  error "CHC_MAX_NUM_ROWS must fit size_t"
 #endif
 #ifndef CHC_MAX_FIXEDSTRING_SIZE
 #define CHC_MAX_FIXEDSTRING_SIZE  0xFFFFFFULL
