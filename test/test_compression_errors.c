@@ -98,6 +98,13 @@ test_frame_rejects(void)
     frame(&b, CHC__COMP_LZ4, 0x40000001u, 4, payload, 0);
     expect_frame_error("oversized frame", &b, &lz4, CHC_ERR_PROTOCOL);
 
+    frame(&b, CHC__COMP_LZ4, CHC__COMP_HEADER_BYTES + 4, 0, payload, 4);
+    expect_frame_error("empty original", &b, &lz4, CHC_ERR_PROTOCOL);
+
+    frame(&b, CHC__COMP_ZSTD, CHC__COMP_HEADER_BYTES + 4,
+          CHC_MAX_FRAME_SIZE + 1, payload, 4);
+    expect_frame_error("oversized original", &b, &zstd, CHC_ERR_PROTOCOL);
+
     frame(&b, 0x77, CHC__COMP_HEADER_BYTES + 4, 4, payload, 4);
     expect_frame_error("unknown method", &b, &lz4, CHC_ERR_PROTOCOL);
 

@@ -310,8 +310,7 @@ test_lz4_orig_over_int_max(void)
     CHECK(strstr(err.msg, "original size") != NULL);
     CHECK_EQ_I64(g_hostile_decomp_calls, 0);
 
-    frame[21] = frame[22] = frame[23] = 0xff;
-    frame[24] = 0x7f;                     /* orig = INT_MAX: in domain */
+    frame[24] = 0x40;                     /* orig = CHC_MAX_FRAME_SIZE: in domain */
     chc_err err2 = {};
     rc = hostile_frame_read(frame, sizeof frame, &al, &err2);
     CHECK(rc == CHC_ERR_PROTOCOL);
