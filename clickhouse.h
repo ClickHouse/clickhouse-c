@@ -3391,12 +3391,9 @@ chc_block_write_cols(chc_io *io, const chc_block_col *cols,
         rc = chc__write_string(io, e->name, e->name_len, err);
         if (rc != CHC_OK) return rc;
 
-        char tbuf[256];
-        size_t need = chc_type_format(e->type, tbuf, sizeof tbuf);
-        if (need >= sizeof tbuf)
-            return chc__err_set(err, CHC_ERR_USAGE,
-                "type name too long for inline buffer");
-        rc = chc__write_string(io, tbuf, need, err);
+        size_t type_len;
+        const char *type_name = chc_type_name(e->type, &type_len);
+        rc = chc__write_string(io, type_name, type_len, err);
         if (rc != CHC_OK) return rc;
 
         if (opts->has_custom_serialization) {

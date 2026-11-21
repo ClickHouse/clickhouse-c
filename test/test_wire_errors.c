@@ -659,36 +659,6 @@ test_read_oom_sweep(void)
     }
 }
 
-static void
-test_block_write_rejects(void)
-{
-    current_test = "block_write_rejects";
-    chc_alloc al = chc_alloc_stdlib();
-    test_mem_sink sink;
-    chc_io io;
-    chc_err err = {};
-
-    /* A type name too long to stage in the inline buffer. */
-    char deep[600];
-    size_t levels = 60, n = 0;
-    for (size_t i = 0; i < levels; i++) n += (size_t) sprintf(deep + n, "Array(");
-    n += (size_t) sprintf(deep + n, "Int32");
-    for (size_t i = 0; i < levels; i++) deep[n++] = ')';
-    deep[n] = '\0';
-
-    chc_type *t = type_of(&al, deep);
-    if (t) {
-        uint64_t offs[1] = { 0 };
-        chc_column leaf = chc_build_fixed(NULL, 4, 0);
-        chc_column arr = chc_build_array(offs, 1, &leaf);
-        chc_block_col col = { .name = "c", .name_len = 1, .type = t, .col = &arr };
-        test_mem_sink_init(&sink, &io);
-        CHECK(chc_block_write_cols(&io, &col, 1, 1, NULL, &err) == CHC_ERR_USAGE);
-        test_mem_sink_free(&sink);
-        chc_type_destroy(t, &al);
-    }
-}
-
 int
 main(void)
 {
@@ -703,7 +673,6 @@ main(void)
     test_write_mismatch();
     test_write_failure_sweep();
     test_read_oom_sweep();
-    test_block_write_rejects();
 
     if (fail_count) {
         fprintf(stderr, "%d failure(s)\n", fail_count);

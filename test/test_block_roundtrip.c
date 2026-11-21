@@ -658,6 +658,25 @@ test_write_map(void)
         "6\tabc");
 }
 
+/* Type names past 255 bytes, eg a wide Enum, reach the wire whole. */
+static void
+test_write_long_enum(void)
+{
+    current_test = "write_long_enum";
+    char type[1024];
+    int n = snprintf(type, sizeof type, "Enum16(");
+    for (int i = 0; i < 40; i++)
+        n += snprintf(type + n, sizeof type - (size_t) n, "%s'label_%02d' = %d",
+                      i ? ", " : "", i, i + 1);
+    snprintf(type + n, sizeof type - (size_t) n, ")");
+    CHECK(strlen(type) > 255);
+    int16_t vals[2] = { 1, 40 };
+    chc_column ce = chc_build_fixed(vals, sizeof vals[0], 2);
+    run_column_roundtrip(current_test, "e", type, &ce,
+        "SELECT arrayStringConcat(groupArray(toString(e)), ',') FROM table",
+        "label_00,label_39");
+}
+
 /* Point = Tuple(Float64, Float64); exercises the geo writer (depth 0). */
 static void
 test_write_point(void)
@@ -799,6 +818,7 @@ int main(void)
     test_write_object_string_wire();
     test_write_tuple();
     test_write_map();
+    test_write_long_enum();
     test_write_point();
     test_write_linestring();
     test_builder_guards();
