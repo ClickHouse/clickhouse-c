@@ -254,13 +254,6 @@ test_col_read_rejects(void)
     expect_col_read("Ring", SIZE_MAX / 4, &empty, CHC_ERR_PROTOCOL);
 
     /* Child counts the decoder cannot make sense of. */
-    expect_col_read("Nullable(Int32, Int32)", 1, &empty, CHC_ERR_TYPE);
-    expect_col_read("Array(Int32, Int32)", 1, &empty, CHC_ERR_TYPE);
-    expect_col_read("Map(Int32)", 1, &empty, CHC_ERR_TYPE);
-    expect_col_read("QBit", 1, &empty, CHC_ERR_TYPE);
-    expect_col_read("LowCardinality(Int32, Int32)", 1, &empty, CHC_ERR_TYPE);
-    expect_col_read("SimpleAggregateFunction", 1, &empty, CHC_ERR_TYPE);
-    expect_col_read("Nested", 1, &empty, CHC_ERR_TYPE);
     expect_col_read("Variant(Int32)", 1, &empty, CHC_ERR_TYPE);
 
     /* String row longer than the wire cap. */
@@ -450,17 +443,15 @@ test_write_mismatch(void)
 
     static const char *const type_of_col[] = {
         "Int32", "String", "Nullable(Int32)", "Array(Int32)", "Tuple(Int32, Int32)",
-        "Map(Int32, Int32)", "Map(Int32, Int32)", "QBit", "LowCardinality(String)",
-        "LowCardinality(String)", "Point", "Ring",
-        "Variant(Int32)", "SimpleAggregateFunction",
-        "Nested(a Int32)", "Nested",
+        "Map(Int32, Int32)", "Map(Int32, Int32)", "QBit(Float32, 8)",
+        "LowCardinality(String)", "LowCardinality(String)", "Point", "Ring",
+        "Variant(Int32)", "Nested(a Int32)",
     };
     const chc_column *col_for[] = {
         &str, &fixed, &fixed, &fixed, &fixed,
-        &fixed, &arr_of_str, &fixed, &str,
-        &lc, &str, &fixed,
+        &fixed, &arr_of_str, &fixed,
+        &str, &lc, &str, &fixed,
         &fixed, &fixed,
-        &fixed, &arr,           /* wrong layout, then Nested without fields */
     };
 
     for (size_t i = 0; i < sizeof type_of_col / sizeof *type_of_col; i++) {
@@ -593,6 +584,78 @@ test_write_failure_sweep(void)
     }
 }
 
+/* Decode one column from raw bytes under a counting allocator failing
+ * fail_at allocations after type parse, SIZE_MAX never */
+static int
+counted_col_read(test_fail_alloc *fa, size_t fail_at, const char *type_src,
+                 size_t n_rows, const void *d, size_t n)
+{
+    chc_alloc al = test_fail_alloc_init(fa, SIZE_MAX);
+    chc_type *t = type_of(&al, type_src);
+    if (!t) return -1;
+    fa->fail_at = fail_at == SIZE_MAX ? SIZE_MAX : fa->calls + fail_at;
+    test_mem_src src;
+    chc_io io;
+    chc_in in;
+    chc_err err = {};
+    chc_column *c = NULL;
+    test_mem_src_init(&src, &io, d, n);
+    int rc = chc_in_init(&in, &io, &al, 0, &err);
+    if (rc == CHC_OK) {
+        rc = chc__col_read(&in, t, n_rows, &c, &err);
+        chc__column_destroy(c, &al);
+        chc_in_free(&in);
+    }
+    fa->fail_at = SIZE_MAX;
+    chc_type_destroy(t, &al);
+    return rc;
+}
+
+/* Reject truncated input with oversized declarations */
+static void
+test_forged_sizes(void)
+{
+    current_test = "forged_sizes";
+    test_fail_alloc fa;
+
+    static const struct { const char *type; size_t rows; } rows[] = {
+        { "UInt64",          (size_t) 1 << 27 },
+        { "Nullable(UInt8)", (size_t) 1 << 30 },
+        { "Array(UInt8)",    (size_t) 1 << 27 },
+        { "String",          (size_t) 1 << 27 },
+    };
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        CHECK(counted_col_read(&fa, SIZE_MAX, rows[i].type, rows[i].rows, "", 0) != CHC_OK);
+        CHECK_EQ_U64(fa.live_bytes, 0);
+    }
+
+    wbuf b = {};
+    wvar(&b, CHC_MAX_STRING_SIZE);
+    CHECK(counted_col_read(&fa, SIZE_MAX, "String", 1, b.d, b.n) != CHC_OK);
+    CHECK_EQ_U64(fa.live_bytes, 0);
+
+    b = (wbuf) {};
+    w64(&b, 1ull << 9); w64(&b, 1); wstr(&b, "a"); w64(&b, (uint64_t) 1 << 30);
+    CHECK(counted_col_read(&fa, SIZE_MAX, "LowCardinality(String)", (size_t) 1 << 30,
+                           b.d, b.n) != CHC_OK);
+    CHECK_EQ_U64(fa.live_bytes, 0);
+
+    /* Block header declaring max columns, then a name longer than input */
+    b = (wbuf) {};
+    wvar(&b, CHC_MAX_NUM_COLUMNS); wvar(&b, 1); wvar(&b, CHC_MAX_STRING_SIZE);
+    chc_alloc al = test_fail_alloc_init(&fa, SIZE_MAX);
+    reader r;
+    chc_err err = {};
+    chc_block *blk = NULL;
+    chc_block_opts opts = {};
+    if (reader_open(&r, &al, &b, &err) == CHC_OK) {
+        CHECK(chc_block_read(&r.in, &al, &opts, &blk, &err) != CHC_OK);
+        chc_block_destroy(blk, &al);
+        chc_in_free(&r.in);
+    }
+    CHECK_EQ_U64(fa.live_bytes, 0);
+}
+
 /* Read paths that allocate: fail one allocation at a time & require the
  * unwind to report OOM without leaking. */
 static void
@@ -673,6 +736,7 @@ main(void)
     test_write_mismatch();
     test_write_failure_sweep();
     test_read_oom_sweep();
+    test_forged_sizes();
 
     if (fail_count) {
         fprintf(stderr, "%d failure(s)\n", fail_count);

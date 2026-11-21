@@ -81,6 +81,18 @@ test_rejects(void)
         "QBit(Float32, x)",
         "QBit(Float32, 0)",
         "Array(NoSuchType)",            /* child parse fails, no field names */
+        "Nullable",                     /* arity: readers index children[0] */
+        "Nullable()",
+        "Nullable(Int32, Int32)",
+        "Array(Int32, Int32)",
+        "Map(Int32)",
+        "LowCardinality(Int32, Int32)",
+        "LowCardinality(Nullable)",
+        "QBit",
+        "Nested",
+        "Nested()",
+        "SimpleAggregateFunction",
+        "AggregateFunction",
         "Tuple(Int32, NoSuchType)",     /* child parse fails, field names live */
         "Array(Int32 Int32)",           /* neither ',' nor ')' */
         "Tuple(x Int32 5)",             /* same, with field names live */
@@ -88,7 +100,7 @@ test_rejects(void)
         "SimpleAggregateFunction()",    /* aggregate function name missing */
         "SimpleAggregateFunction('sum', UInt64)",   /* quoted function name */
         "AggregateFunction(`sum`, Int64)",          /* quoted function name */
-        "AggregateFunction(sum)",                   /* no argument type */
+        "SimpleAggregateFunction(sum)",             /* no storage type */
         "AggregateFunction(2 sum, Int64)",          /* missing comma after version */
         "AggregateFunction(quantile(0.5, Float64",  /* unclosed parameter list */
         "AggregateFunction(sequenceMatch('(?1), DateTime)",   /* unclosed quote */
@@ -150,12 +162,15 @@ test_accessors(void)
     chc_type_enum_at(i32, 0, NULL, NULL, NULL);          /* not an enum, no outputs */
 
     chc_type *agg  = parse_ok(&al, "SimpleAggregateFunction(sum, UInt64)");
-    chc_type *bare = parse_ok(&al, "AggregateFunction");
+    chc_type *cnt  = parse_ok(&al, "AggregateFunction(count)");
     size_t fn_len = 99;
+    CHECK(chc_type_agg_function(cnt, &fn_len) != NULL);
+    CHECK_EQ_U64(fn_len, 5);
+    CHECK_EQ_U64(chc_type_n_children(cnt), 0);
     const char *fn = chc_type_agg_function(agg, &fn_len);
     CHECK(fn != NULL);
     if (fn) CHECK_STR_EQ(fn, fn_len, "sum");
-    CHECK(chc_type_agg_function(bare, &fn_len) == NULL);
+    CHECK(chc_type_agg_function(i32, &fn_len) == NULL);
     CHECK_EQ_U64(fn_len, 0);
     CHECK(chc_type_agg_function(i32, NULL) == NULL);
     CHECK(chc_type_agg_function(NULL, &fn_len) == NULL);
@@ -164,7 +179,7 @@ test_accessors(void)
     chc_type_destroy(i32, &al);
     chc_type_destroy(en, &al);
     chc_type_destroy(agg, &al);
-    chc_type_destroy(bare, &al);
+    chc_type_destroy(cnt, &al);
 }
 
 static void
