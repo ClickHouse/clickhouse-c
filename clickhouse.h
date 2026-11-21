@@ -26,7 +26,9 @@
 /* Macros use C23 features when available, degrading to GNU/builtin equivalent,
  * then to harmless nop, so consumers may build under any -std >= c11 */
 
-#if defined(__has_c_attribute)
+/* [[attr]] syntax is C23; GCC reports __has_c_attribute under earlier -std
+ * too, then warns on every use with -Wpedantic */
+#if defined(__has_c_attribute) && defined(__STDC_VERSION__) && __STDC_VERSION__ >= 202311L
 #  define CHC__HAS_ATTR(x) __has_c_attribute(x)
 #else
 #  define CHC__HAS_ATTR(x) 0
@@ -70,7 +72,12 @@
 
 #if CHC__HAS_ATTR(fallthrough)
 #  define CHC_FALLTHROUGH [[fallthrough]]
-#else
+#elif defined(__has_attribute)
+#  if __has_attribute(fallthrough)
+#    define CHC_FALLTHROUGH __attribute__((fallthrough))
+#  endif
+#endif
+#ifndef CHC_FALLTHROUGH
 #  define CHC_FALLTHROUGH
 #endif
 
@@ -1472,7 +1479,7 @@ chc__fields_free(const chc_alloc *al, chc__fields *f)
         al->free(al->ud, f->names[i], f->lens[i] + 1);
     al->free(al->ud, f->names, f->n_names * sizeof *f->names);
     al->free(al->ud, f->lens,  f->n_lens * sizeof *f->lens);
-    *f = (chc__fields) {};
+    *f = (chc__fields) {0};
 }
 
 static int
@@ -1768,12 +1775,12 @@ chc__parse_type(chc__lex *lx, const chc_alloc *al,
             bool        named     = (t->kind == CHC_TUPLE
                                      || t->kind == CHC_NESTED);
             bool        any_named = false;
-            chc__fields fields    = {};
+            chc__fields fields    = {0};
             for (;;) {
                 chc__tok la = chc__peek_tok(lx);
                 if (la.kind == CHC__TOK_RPAREN) break;
 
-                chc__tok field = {};
+                chc__tok field = {0};
                 bool has_field = false;
                 if (named && la.kind == CHC__TOK_NAME) {
                     chc__eat_tok(lx);
@@ -1869,7 +1876,7 @@ int
 chc_type_parse(const char *name, size_t name_len,
                const chc_alloc *al, chc_type **out, chc_err *err)
 {
-    chc__lex lx = { name, name + name_len, {}, false };
+    chc__lex lx = { name, name + name_len, {0}, false };
     int rc = chc__parse_type(&lx, al, name, name + name_len, 0, out, err);
     if (rc != CHC_OK) return rc;
     chc__tok tail = chc__eat_tok(&lx);
@@ -2938,7 +2945,7 @@ int
 chc_block_read(chc_in *in, const chc_alloc *al,
                const chc_block_opts *opts, chc_block **out, chc_err *err)
 {
-    chc_block_opts def = {};
+    chc_block_opts def = {0};
     if (!opts) opts = &def;
     /* Snapshot to roll back resume's per-column checkpoint progress: this
      * non-resuming entry is baseline (rewind to packet start), so a would-block
@@ -3345,7 +3352,7 @@ chc__col_write(chc_io *io, const chc_column *c, const chc_type *t, chc_err *err)
 
     case CHC_NOTHING:
     case CHC_VOID: {
-        uint8_t zeros[256] = {};
+        uint8_t zeros[256] = {0};
         size_t left = c->n_rows;
         while (left) {
             size_t take = left < sizeof zeros ? left : sizeof zeros;
@@ -3365,7 +3372,7 @@ chc_block_write_cols(chc_io *io, const chc_block_col *cols,
                      size_t n_cols, size_t n_rows,
                      const chc_block_opts *opts, chc_err *err)
 {
-    chc_block_opts def = {};
+    chc_block_opts def = {0};
     if (!opts) opts = &def;
 
     if (opts->has_block_info) {

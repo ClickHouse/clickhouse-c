@@ -54,6 +54,7 @@ run_one() {
     [[ $name == compress_no_async ]] && libs+=(-llz4)
     [[ $name == prepared ]] && libs+=(-llz4 -lzstd)
     [[ $name == openssl_io ]] && libs+=(-lssl -lcrypto -lpthread)
+    [[ $name == c11 ]] && libs+=(-llz4 -lzstd -lssl -lcrypto)
     # async_uring: enable real body when liburing available, else skip stub
     if [[ $name == async_uring && $uring == 1 ]]; then
         defs+=(-DCHC_ASYNC_URING_TEST)
