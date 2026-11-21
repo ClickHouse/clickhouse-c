@@ -2122,6 +2122,12 @@ chc__col_read_string(chc_in *in, size_t n_rows,
         total += len;
         c->str.offsets[i] = total;
     }
+    /* Decoded blocks outlive the read, so drop the doubling slack. A refused
+     * shrink keeps the larger buffer */
+    if (total && total < c->str.bytes) {
+        uint8_t *r = al->realloc(al->ud, c->str.data, c->str.bytes, total);
+        if (r) { c->str.data = r; c->str.bytes = total; }
+    }
     *out = c;
     return CHC_OK;
 }

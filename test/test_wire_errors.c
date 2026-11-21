@@ -274,6 +274,36 @@ test_col_read_rejects(void)
     expect_col_read("SimpleAggregateFunction(sum, UInt64)", 1, &u64row, CHC_OK);
 }
 
+/* A completed String column holds its bytes, not the doubling slack */
+static void
+test_string_exact_size(void)
+{
+    current_test = "string_exact_size";
+    chc_alloc al = chc_alloc_stdlib();
+    chc_type *t = type_of(&al, "String");
+    if (!t) return;
+
+    wbuf b = {};
+    wvar(&b, 200); memset(b.d + b.n, 'a', 200); b.n += 200;
+    wvar(&b, 57);  memset(b.d + b.n, 'b', 57);  b.n += 57;
+
+    reader r;
+    chc_err err = {};
+    chc_column *c = NULL;
+    if (reader_open(&r, &al, &b, &err) != CHC_OK) { fail_count++; goto out; }
+    CHECK(chc__col_read(&r.in, t, 2, &c, &err) == CHC_OK);
+    if (c) {
+        CHECK_EQ_U64(c->str.bytes, 257);
+        CHECK_EQ_U64(chc_column_string_offsets(c)[1], 257);
+        CHECK(chc_column_string_data(c)[199] == 'a');
+        CHECK(chc_column_string_data(c)[256] == 'b');
+    }
+    chc__column_destroy(c, &al);
+    chc_in_free(&r.in);
+out:
+    chc_type_destroy(t, &al);
+}
+
 static void
 test_low_cardinality_rejects(void)
 {
@@ -698,6 +728,7 @@ main(void)
     test_validate();
     test_elem_size();
     test_col_read_rejects();
+    test_string_exact_size();
     test_low_cardinality_rejects();
     test_block_header_rejects();
     test_write_mismatch();
