@@ -235,6 +235,12 @@ test_recv_packets(void)
     b = (wbuf) {}; wvar(&b, CHC_PKT_PROFILE_INFO); wvar(&b, 1);
     expect_packet("short profile info", &b, REV_MODERN, CHC_ERR_EOF, CHC_PKT_HELLO);
 
+    b = (wbuf) {}; wvar(&b, CHC_PKT_DATA); wvar(&b, CHC_MAX_STRING_SIZE + 1);
+    expect_packet("lead string too long", &b, REV_MODERN, CHC_ERR_PROTOCOL, CHC_PKT_HELLO);
+
+    b = (wbuf) {}; wvar(&b, CHC_PKT_DATA); wvar(&b, 5); w8(&b, 'x');
+    expect_packet("short lead string", &b, REV_MODERN, CHC_ERR_EOF, CHC_PKT_HELLO);
+
     /* Block body that fails to parse: the partial is dropped, not returned. */
     b = (wbuf) {};
     wvar(&b, CHC_PKT_DATA);
