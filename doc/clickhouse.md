@@ -193,13 +193,7 @@ const char      *chc_type_tuple_field_name  (const chc_type *t, size_t i,
                                              size_t *out_len);
 const char      *chc_type_agg_function      (const chc_type *t,
                                              size_t *out_len);
-
-size_t           chc_type_format            (const chc_type *t,
-                                             char *buf, size_t buf_len);
 ```
-
-`chc_type_format` is snprintf-style: pass `NULL`/0 to query length, then
-allocate & call again.
 
 `chc_type_tuple_field_name` covers `Nested` as well as `Tuple`; both label
 their children, `Nested(a UInt32, b String)` reading back `a` & `b`.

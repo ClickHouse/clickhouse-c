@@ -212,16 +212,6 @@ test_decimal_precision(void)
 }
 
 static void
-test_format_unnamed(void)
-{
-    current_test = "format_unnamed";
-    chc_type t = {};                    /* only the parser fills in name */
-    char buf[8] = "junk";
-    CHECK_EQ_U64(chc_type_format(&t, buf, sizeof buf), 0);
-    CHECK_EQ_U64(chc_type_format(NULL, buf, sizeof buf), 0);
-}
-
-static void
 test_datetime_timezone(void)
 {
     current_test = "datetime_timezone";
@@ -375,7 +365,6 @@ main(void)
     test_depth_limit();
     test_accessors();
     test_decimal_precision();
-    test_format_unnamed();
     test_datetime_timezone();
     test_aggregate_function();
     test_nested_json_params();
