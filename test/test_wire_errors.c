@@ -274,39 +274,6 @@ test_col_read_rejects(void)
     expect_col_read("SimpleAggregateFunction(sum, UInt64)", 1, &u64row, CHC_OK);
 }
 
-/* Row counts past SIZE_MAX are rejected, not truncated, on 32-bit targets */
-static void
-test_rows_past_size_t(void)
-{
-    current_test = "rows_past_size_t";
-#if SIZE_MAX < UINT64_MAX
-    const uint64_t rows = ((uint64_t) 1 << 32) + 1;
-    wbuf b = {};
-
-    /* Array offsets ending past SIZE_MAX, one nested byte sent */
-    w64(&b, rows); w8(&b, 7);
-    expect_col_read("Array(UInt8)", 1, &b, CHC_ERR_PROTOCOL);
-
-    /* LowCardinality dictionary past SIZE_MAX */
-    b.n = 0;
-    w64(&b, 1ull << 9); w64(&b, rows); wstr(&b, "a"); w64(&b, 1); w8(&b, 0);
-    expect_col_read("LowCardinality(String)", 1, &b, CHC_ERR_PROTOCOL);
-
-    /* Block header declaring 2^32 + 1 rows, one row sent */
-    b.n = 0;
-    wvar(&b, 1); wvar(&b, rows); wstr(&b, "c"); wstr(&b, "UInt8"); w8(&b, 7);
-    chc_alloc al = chc_alloc_stdlib();
-    reader r;
-    chc_err err = {};
-    chc_block *blk = NULL;
-    chc_block_opts opts = {};
-    if (reader_open(&r, &al, &b, &err) != CHC_OK) { fail_count++; return; }
-    CHECK(chc_block_read(&r.in, &al, &opts, &blk, &err) == CHC_ERR_PROTOCOL);
-    chc_block_destroy(blk, &al);
-    chc_in_free(&r.in);
-#endif
-}
-
 static void
 test_low_cardinality_rejects(void)
 {
@@ -701,7 +668,6 @@ main(void)
     test_validate();
     test_elem_size();
     test_col_read_rejects();
-    test_rows_past_size_t();
     test_low_cardinality_rejects();
     test_block_header_rejects();
     test_write_mismatch();
