@@ -256,12 +256,6 @@ const char  *chc_type_tuple_field_name(const chc_type *t, size_t i,
 /* Return an aggregate function name without parameters, or NULL when absent */
 const char  *chc_type_agg_function(const chc_type *t, size_t *out_len);
 
-/* Reproduce the printable type name into buf. Returns the number of bytes
- * that would have been written (snprintf-style); use to size buf on a
- * second pass when the return value >= buf_len. buf may be NULL when
- * buf_len == 0 (length query). */
-size_t       chc_type_format(const chc_type *t, char *buf, size_t buf_len);
-
 /* -------------------------------------------------------------------------- */
 /* Columns                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -1879,21 +1873,6 @@ chc_type_parse(const char *name, size_t name_len,
         return chc__err_set(err, CHC_ERR_TYPE, "trailing tokens in type name");
     }
     return CHC_OK;
-}
-
-size_t
-chc_type_format(const chc_type *t, char *buf, size_t buf_len)
-{
-    if (!t) return 0;
-    if (t->name && t->name_len) {
-        if (buf && buf_len) {
-            size_t take = t->name_len < buf_len - 1 ? t->name_len : buf_len - 1;
-            memcpy(buf, t->name, take);
-            buf[take] = '\0';
-        }
-        return t->name_len;
-    }
-    return 0;
 }
 
 /* -------- column internals ---------- */

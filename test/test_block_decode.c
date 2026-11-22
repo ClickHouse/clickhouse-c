@@ -961,18 +961,9 @@ static void test_type_parse_roundtrip(void) {
             fail_count++;
             continue;
         }
-        char buf[128];
-        size_t need = chc_type_format(t, buf, sizeof buf);
-        if (need >= sizeof buf) {
-            fprintf(stderr, "%s: format overflow\n", types[i]);
-            fail_count++;
-        }
-        /* Round-trip should be identical or a normalized form */
-        if (strcmp(types[i], buf) != 0) {
-            /* For Enum the input has spaces in the formatted output too, OK */
-            fprintf(stderr, "%s: round-trip mismatch -> %s\n", types[i], buf);
-            /* not a hard fail: we exact-match the source string today */
-        }
+        size_t len;
+        const char *nm = chc_type_name(t, &len);
+        CHECK_STR_EQ(nm, len, types[i]);
         chc_type_destroy(t, &al);
     }
 }

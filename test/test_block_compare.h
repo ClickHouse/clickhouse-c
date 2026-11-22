@@ -6,7 +6,6 @@
 #define CLICKHOUSE_TEST_BLOCK_COMPARE_H
 
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 
 static int test_col_eq(const chc_column *a, const chc_column *b);
@@ -15,23 +14,10 @@ static int
 test_type_eq(const chc_type *a, const chc_type *b)
 {
     if (!a || !b) return a == b;
-    size_t na = chc_type_format(a, NULL, 0);
-    size_t nb = chc_type_format(b, NULL, 0);
-    if (na != nb) return 0;
-
-    char *sa = malloc(na + 1);
-    char *sb = malloc(nb + 1);
-    if (!sa || !sb) {
-        free(sa);
-        free(sb);
-        return 0;
-    }
-    chc_type_format(a, sa, na + 1);
-    chc_type_format(b, sb, nb + 1);
-    int eq = memcmp(sa, sb, na) == 0;
-    free(sa);
-    free(sb);
-    return eq;
+    size_t na, nb;
+    const char *sa = chc_type_name(a, &na);
+    const char *sb = chc_type_name(b, &nb);
+    return na == nb && memcmp(sa, sb, na) == 0;
 }
 
 static int
