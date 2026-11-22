@@ -962,11 +962,17 @@ chc__read_bytes(chc_in *in, void *dst, size_t n, chc_err *err)
 static int
 chc__skip_bytes(chc_in *in, size_t n, chc_err *err)
 {
-    uint8_t sink[256];
     while (n) {
-        size_t take = n < sizeof sink ? n : sizeof sink;
-        int rc = chc__read_bytes(in, sink, take, err);
-        if (rc != CHC_OK) return rc;
+        if (in->pos >= in->fill) {
+            int rc = chc__in_refill(in, err);
+            if (rc == CHC_ERR_EOF)
+                return chc__err_set(err, CHC_ERR_EOF, "short read");
+            if (rc != CHC_OK) return rc;
+        }
+        size_t avail = in->fill - in->pos;
+        size_t take = n < avail ? n : avail;
+        in->pos += take;
+        in->consumed += take;
         n -= take;
     }
     return CHC_OK;

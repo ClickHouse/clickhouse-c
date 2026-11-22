@@ -350,6 +350,18 @@ chc__read_server_string(chc_in *in, char *dst, size_t cap, chc_err *err)
     return chc__skip_bytes(in, (size_t) len - n, err);
 }
 
+static int
+chc__skip_string(chc_in *in, chc_err *err)
+{
+    uint64_t len;
+    int rc = chc__read_varuint(in, &len, err);
+    if (rc != CHC_OK) return rc;
+    if (len > CHC_MAX_STRING_SIZE)
+        return chc__err_set(err, CHC_ERR_PROTOCOL, "string too long: %llu",
+                            (unsigned long long) len);
+    return chc__skip_bytes(in, (size_t) len, err);
+}
+
 static void
 chc__client_setup(chc_client *c, const chc_client_opts *opts)
 {
@@ -404,7 +416,6 @@ chc__client_recv_hello(chc_client *c, chc_exception **exc, chc_err *err)
     /* Commit only complete Hello, async handshake retries on WOULD_BLOCK */
     chc_server_info s = {};
     uint64_t n_rules, nonce;
-    char rule[1];
     if ((rc = chc__read_server_string(&c->in, s.name, sizeof s.name, err)) ||
         (rc = chc__read_varuint(&c->in, &s.version_major, err)) ||
         (rc = chc__read_varuint(&c->in, &s.version_minor, err)) ||
@@ -426,7 +437,7 @@ chc__client_recv_hello(chc_client *c, chc_exception **exc, chc_err *err)
                             (unsigned long long) n_rules);
     /* Pattern & message pairs, discarded */
     for (uint64_t i = 0; i < 2 * n_rules; i++)
-        if ((rc = chc__read_server_string(&c->in, rule, sizeof rule, err))) return rc;
+        if ((rc = chc__skip_string(&c->in, err))) return rc;
     /* Nonce only serves interserver secret */
     if ((rc = chc__read_u64_le(&c->in, &nonce, err))) return rc;
     c->server = s;
@@ -746,17 +757,6 @@ chc_packet_clear(chc_client *c, chc_packet *p)
     }
 }
 
-/* Skip temp-table name or log tag block-bearing packets carry before block */
-static int
-chc__recv_skip_lead_string(chc_client *c, chc_err *err)
-{
-    char *s; size_t slen;
-    int rc = chc__read_string(&c->in, &s, &slen, err);
-    if (rc != CHC_OK) return rc;
-    c->al->free(c->al->ud, s, slen + 1);
-    return CHC_OK;
-}
-
 /* Read one compressed block body from c->in into *out, io-backed
  * path only. Build a per-call decompressor + io-backed dec_in over the raw in
  * and run the block reader; io-backed refill blocks, so the block always
@@ -935,11 +935,8 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
         case CHC_PKT_TABLE_COLUMNS: {
             out->kind = CHC_PKT_TABLE_COLUMNS;
             /* table name + columns metadata; both varstrings, both ignored. */
-            char *s; size_t slen;
-            if ((rc = chc__read_string(&c->in, &s, &slen, err))) goto maybe_rewind;
-            c->al->free(c->al->ud, s, slen + 1);
-            if ((rc = chc__read_string(&c->in, &s, &slen, err))) goto maybe_rewind;
-            c->al->free(c->al->ud, s, slen + 1);
+            if ((rc = chc__skip_string(&c->in, err)) ||
+                (rc = chc__skip_string(&c->in, err))) goto maybe_rewind;
             goto control_done;
         }
 
@@ -966,7 +963,8 @@ chc__recv_packet_resumable(chc_client *c, chc_packet *out, chc_err *err)
                                 (unsigned long long) kind);
         }
 
-        rc = chc__recv_skip_lead_string(c, err);
+        /* Skip temp-table name or log tag preceding block */
+        rc = chc__skip_string(&c->in, err);
         if (rc != CHC_OK) goto maybe_rewind;
 
         /* Kind + leading string committed; resume owns the cursor from here.
